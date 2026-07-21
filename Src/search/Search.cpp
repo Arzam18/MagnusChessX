@@ -3109,7 +3109,7 @@ struct Searcher {
         const int count = std::min<int>(6, static_cast<int>(entries.size()));
         for (int i = 0; i < count; ++i) {
             const DebugEntry& e = entries[static_cast<std::size_t>(i)];
-            out << ' ' << move_to_uci(e.move)
+            out << ' ' << move_to_uci(e.move, root.chess960)
                 << "[c=" << e.entry.credit
                 << ",h=" << (e.entry.exactHits + e.entry.boundHits)
                 << ",w=" << e.entry.workerHits
@@ -5497,16 +5497,22 @@ void reset_searcher_iteration(
 
 } // namespace
 
-std::string move_to_uci(Move m) {
+std::string move_to_uci(Move m, bool chess960) {
     if (move_is_none(m))
         return "0000";
+
+    Square destination = to_sq(m);
+    if (move_is_castle(m) && !chess960) {
+        const Color color = rank_of(from_sq(m)) == 0 ? WHITE : BLACK;
+        destination = castling_king_to(color, move_flag(m));
+    }
 
     std::string s;
     s.reserve(5);
     s.push_back(static_cast<char>('a' + file_of(from_sq(m))));
     s.push_back(static_cast<char>('1' + rank_of(from_sq(m))));
-    s.push_back(static_cast<char>('a' + file_of(to_sq(m))));
-    s.push_back(static_cast<char>('1' + rank_of(to_sq(m))));
+    s.push_back(static_cast<char>('a' + file_of(destination)));
+    s.push_back(static_cast<char>('1' + rank_of(destination)));
 
     if (move_is_promotion(m)) {
         switch (promo_piece(m)) {
@@ -5825,10 +5831,10 @@ bool append_pv_previous_key(
                 *diagnostic_out
                     << "info string PV_VALIDATE illegal move at index " << i
                     << " ply " << i
-                    << " move " << move_to_uci(move)
+                    << " move " << move_to_uci(move, root.chess960)
                     << " pv";
                 for (int k = 0; k < pv_length; ++k)
-                    *diagnostic_out << ' ' << move_to_uci(pv[k]);
+                    *diagnostic_out << ' ' << move_to_uci(pv[k], root.chess960);
                 *diagnostic_out << '\n';
             }
 #if !defined(NDEBUG)
@@ -6272,7 +6278,7 @@ void emit_iteration_info(
     }
 
     for (int i = 0; i < emitted_pv_length; ++i)
-        stream << ' ' << move_to_uci(emitted_pv[i]);
+        stream << ' ' << move_to_uci(emitted_pv[i], local_root.chess960);
 
     stream << '\n';
 }

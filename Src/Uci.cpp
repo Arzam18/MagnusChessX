@@ -312,16 +312,24 @@ inline void push_position_history(
     return result;
 }
 
-[[nodiscard]] std::string display_castling_rights(int rights) {
+[[nodiscard]] std::string display_castling_rights(const Position& pos) {
     std::string result;
-    if ((rights & WHITE_OO) != 0)
-        result.push_back('K');
-    if ((rights & WHITE_OOO) != 0)
-        result.push_back('Q');
-    if ((rights & BLACK_OO) != 0)
-        result.push_back('k');
-    if ((rights & BLACK_OOO) != 0)
-        result.push_back('q');
+    const auto append = [&](int right, char standard) {
+        if ((pos.castling_rights & right) == 0)
+            return;
+        if (!pos.chess960) {
+            result.push_back(standard);
+            return;
+        }
+
+        const Square rook_from = pos.castling_rook_square[right];
+        const char base = right == WHITE_OO || right == WHITE_OOO ? 'A' : 'a';
+        result.push_back(static_cast<char>(base + file_of(rook_from)));
+    };
+    append(WHITE_OO, 'K');
+    append(WHITE_OOO, 'Q');
+    append(BLACK_OO, 'k');
+    append(BLACK_OOO, 'q');
     return result.empty() ? "-" : result;
 }
 
@@ -352,7 +360,7 @@ inline void push_position_history(
     }
 
     fen += pos.side_to_move == WHITE ? " w " : " b ";
-    fen += display_castling_rights(pos.castling_rights);
+    fen += display_castling_rights(pos);
     fen.push_back(' ');
     fen += display_square(pos.ep_sq);
     fen.push_back(' ');
@@ -496,7 +504,8 @@ void display_position(const Position& pos, std::ostream& out) {
     Position& pos,
     const memory::Memory& mem,
     std::string_view command,
-    PositionHistory& history
+    PositionHistory& history,
+    bool chess960
 ) noexcept {
     std::istringstream iss{std::string(command)};
     std::string token;
@@ -505,7 +514,7 @@ void display_position(const Position& pos, std::ostream& out) {
         return false;
 
     if (token == "startpos") {
-        set_start_position(pos);
+        set_start_position(pos, chess960);
         position_refresh_key(pos, mem.tables);
     } else if (token == "fen") {
         std::string fen;
@@ -520,7 +529,7 @@ void display_position(const Position& pos, std::ostream& out) {
             fen += part;
         }
 
-        if (!parse_fen(pos, mem, fen))
+        if (!parse_fen(pos, mem, fen, chess960))
             return false;
     } else {
         return false;
@@ -879,7 +888,7 @@ struct SearchBenchResult {
         unmake_move(pos, move, mem.tables, st);
 
         total += nodes;
-        out << search::move_to_uci(move) << ' ' << nodes << '\n';
+        out << search::move_to_uci(move, pos.chess960) << ' ' << nodes << '\n';
     }
 
     out << "nodes " << total << '\n';
@@ -907,6 +916,7 @@ struct UciSession {
     PositionHistory position_history{};
     timeman::TimeManager time_manager{};
     bool enable_ponder = true;
+    bool chess960 = false;
     bool full_pv = false;
     bool use_msv_smp = false;
     bool msv_info = false;
@@ -931,7 +941,7 @@ struct UciSession {
             static_cast<std::size_t>(DEFAULT_UCI_THREADS)
         );
         // attack_init_backend deferred to first command that needs it.
-        set_start_position(pos);
+        set_start_position(pos, chess960);
         position_refresh_key(pos, mem.tables);
         (void)ensure_eval_loaded(nullptr);
     }
@@ -1022,6 +1032,7 @@ struct UciSession {
             << " min " << timeman::MIN_MOVE_OVERHEAD_MS
             << " max " << timeman::MAX_MOVE_OVERHEAD_MS << "\n";
         out << "option name Ponder type check default true\n";
+        out << "option name UCI_Chess960 type check default false\n";
         out << "option name SyzygyPath type string default <empty>\n";
         out << "option name SyzygyProbeDepth type spin default "
             << syzygy::DEFAULT_PROBE_DEPTH
@@ -1042,7 +1053,7 @@ struct UciSession {
     void reset_new_game() {
         memory::memory_clear_hash(mem);
         search_session_state.new_game();
-        set_start_position(pos);
+        set_start_position(pos, chess960);
         position_refresh_key(pos, mem.tables);
         clear_position_history(position_history);
         time_manager.new_game();
@@ -1201,6 +1212,17 @@ struct UciSession {
             bool parsed = false;
             if (parse_bool(value, parsed))
                 enable_ponder = parsed;
+        }
+        else if (name == "UCI_Chess960") {
+            bool parsed = false;
+            if (parse_bool(value, parsed) && parsed != chess960) {
+                stop_search();
+                chess960 = parsed;
+                pos.chess960 = chess960;
+                memory::memory_clear_hash(mem);
+                search_session_state.new_game();
+                clear_position_history(position_history);
+            }
         }
         else if (name == "SyzygyPath") {
             syzygy_path = value == "<empty>" ? std::string{} : value;
@@ -1471,7 +1493,8 @@ struct UciSession {
                 pos,
                 mem,
                 command_arguments(line, "position"),
-                position_history
+                position_history,
+                chess960
             )) {
             out << "info string invalid position command\n";
             return;
@@ -1494,7 +1517,7 @@ struct UciSession {
             return;
         }
 
-        if (!parse_fen(pos, mem, fen)) {
+        if (!parse_fen(pos, mem, fen, chess960)) {
             out << "invalid -> " << command << '\n';
             out << "usage -> " << command << " [->] <fen>\n";
             return;
@@ -1596,7 +1619,8 @@ struct UciSession {
                 &limits
             );
 
-            std::cout << "bestmove " << search::move_to_uci(result.best_move);
+            std::cout << "bestmove "
+                      << search::move_to_uci(result.best_move, root.chess960);
             if (enable_ponder && !ponder.empty())
                 std::cout << " ponder " << ponder;
             std::cout << std::endl;

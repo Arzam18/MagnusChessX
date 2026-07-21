@@ -78,30 +78,12 @@ namespace magnus {
     }
 }
 
-[[nodiscard]] inline bool move_matches_uci(Move move, std::string_view token) noexcept {
-    if (token.size() != 4 && token.size() != 5)
-        return false;
-
-    if (token[0] != static_cast<char>('a' + file_of(from_sq(move))) ||
-        token[1] != static_cast<char>('1' + rank_of(from_sq(move))) ||
-        token[2] != static_cast<char>('a' + file_of(to_sq(move))) ||
-        token[3] != static_cast<char>('1' + rank_of(to_sq(move)))) {
-        return false;
-    }
-
-    if (!move_is_promotion(move))
-        return token.size() == 4;
-
-    if (token.size() != 5)
-        return false;
-
-    switch (promo_piece(move)) {
-        case KNIGHT: return token[4] == 'n';
-        case BISHOP: return token[4] == 'b';
-        case ROOK:   return token[4] == 'r';
-        case QUEEN:  return token[4] == 'q';
-        default:     return false;
-    }
+[[nodiscard]] inline bool move_matches_uci(
+    Move move,
+    std::string_view token,
+    bool chess960
+) noexcept {
+    return token == search::move_to_uci(move, chess960);
 }
 
 [[nodiscard]] inline bool find_uci_move(
@@ -114,7 +96,7 @@ namespace magnus {
     generate_legal(pos, mem, list);
 
     for (int i = 0; i < list.size; ++i) {
-        if (move_matches_uci(list.moves[i], token)) {
+        if (move_matches_uci(list.moves[i], token, pos.chess960)) {
             move = list.moves[i];
             return true;
         }
@@ -198,12 +180,12 @@ namespace magnus {
     return legal.size == 0;
 }
 
-inline void set_start_position(Position& pos) noexcept {
+inline void set_start_position(Position& pos, bool chess960 = false) noexcept {
     position_clear(pos);
 
     pos.side_to_move = WHITE;
     pos.ep_sq = NO_SQ;
-    pos.castling_rights = ANY_CASTLING;
+    pos.chess960 = chess960;
     pos.halfmove_clock = 0;
     pos.fullmove_number = 1;
 
@@ -229,6 +211,14 @@ inline void set_start_position(Position& pos) noexcept {
     position_put_piece(pos, BLACK, BISHOP, 61);
     position_put_piece(pos, BLACK, KNIGHT, 62);
     position_put_piece(pos, BLACK, ROOK, 63);
+
+    const bool rights_ok =
+        position_set_castling_right(pos, WHITE, 7) &&
+        position_set_castling_right(pos, WHITE, 0) &&
+        position_set_castling_right(pos, BLACK, 63) &&
+        position_set_castling_right(pos, BLACK, 56);
+    assert(rights_ok);
+    (void)rights_ok;
 }
 
 class PvTrackingStreamBuf final : public std::streambuf {
@@ -355,7 +345,7 @@ private:
     if (!find_uci_move(after_best, mem, ponder_token, ponder_move))
         return {};
 
-    return search::move_to_uci(ponder_move);
+    return search::move_to_uci(ponder_move, after_best.chess960);
 }
 
 [[nodiscard]] inline std::string ponder_move_from_search_result(
@@ -406,14 +396,14 @@ private:
     if (result.pv_length > 1 &&
         result.pv[0] == best_move &&
         legal_move_exists(after_best, mem, result.pv[1])) {
-        return search::move_to_uci(result.pv[1]);
+        return search::move_to_uci(result.pv[1], root.chess960);
     }
 
     const memory::TTProbe probe =
         memory::tt_probe(mem.tt, memory::tt_key(after_best, mem.tables));
     const Move tt_move = probe.hit ? static_cast<Move>(probe.data.move) : Move(0);
     if (legal_move_exists(after_best, mem, tt_move))
-        return search::move_to_uci(tt_move);
+        return search::move_to_uci(tt_move, root.chess960);
 
     return {};
 }
@@ -421,7 +411,8 @@ private:
 [[nodiscard]] inline bool parse_fen(
     Position& pos,
     const memory::Memory& mem,
-    std::string_view fen
+    std::string_view fen,
+    bool chess960 = false
 ) noexcept {
     std::istringstream iss{std::string(fen)};
 
@@ -438,6 +429,7 @@ private:
     iss >> halfmove_part >> fullmove_part;
 
     position_clear(pos);
+    pos.chess960 = chess960;
 
     int rank = 7;
     int file = 0;
@@ -475,15 +467,47 @@ private:
     else if (stm_part == "b") pos.side_to_move = BLACK;
     else return false;
 
-    pos.castling_rights = NO_CASTLING;
     if (castling_part != "-") {
-        for (char c : castling_part) {
-            switch (c) {
-                case 'K': pos.castling_rights |= WHITE_OO; break;
-                case 'Q': pos.castling_rights |= WHITE_OOO; break;
-                case 'k': pos.castling_rights |= BLACK_OO; break;
-                case 'q': pos.castling_rights |= BLACK_OOO; break;
-                default: return false;
+        if (castling_part.empty() || castling_part.find('-') != std::string::npos)
+            return false;
+
+        for (char token : castling_part) {
+            const bool black = std::islower(static_cast<unsigned char>(token));
+            const Color color = black ? BLACK : WHITE;
+            const char upper = static_cast<char>(
+                std::toupper(static_cast<unsigned char>(token))
+            );
+            const int home_rank = color == WHITE ? 0 : 7;
+            const Square king_from = pos.king_sq[color];
+            if (!is_ok(king_from) || rank_of(king_from) != home_rank)
+                return false;
+
+            Square rook_from = NO_SQ;
+            if (upper == 'K') {
+                for (int rook_file = 7; rook_file > file_of(king_from); --rook_file) {
+                    const Square candidate = home_rank * 8 + rook_file;
+                    if (piece_on(pos, candidate) == make_piece(color, ROOK)) {
+                        rook_from = candidate;
+                        break;
+                    }
+                }
+            } else if (upper == 'Q') {
+                for (int rook_file = 0; rook_file < file_of(king_from); ++rook_file) {
+                    const Square candidate = home_rank * 8 + rook_file;
+                    if (piece_on(pos, candidate) == make_piece(color, ROOK)) {
+                        rook_from = candidate;
+                        break;
+                    }
+                }
+            } else if (upper >= 'A' && upper <= 'H') {
+                rook_from = home_rank * 8 + (upper - 'A');
+            } else {
+                return false;
+            }
+
+            if (!is_ok(rook_from) ||
+                !position_set_castling_right(pos, color, rook_from)) {
+                return false;
             }
         }
     }

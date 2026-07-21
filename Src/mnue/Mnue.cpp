@@ -883,12 +883,15 @@ template<class Layout>
         input_bucket<Layout>(pos, BLACK)
     }};
     const Square from = from_sq(move);
-    const Square to = to_sq(move);
+    const Square encoded_to = to_sq(move);
     const Piece moving = piece_on(pos, from);
     assert(moving != PIECE_NONE);
 
     const Color moving_color = color_of(moving);
     const PieceType moving_type = type_of(moving);
+    const Square to = move_is_castle(move)
+        ? castling_king_to(moving_color, move_flag(move))
+        : encoded_to;
     if (moving_type == KING) {
         const int from_bucket = king_bucket<Layout>(relative_square(moving_color, from));
         const int to_bucket = king_bucket<Layout>(relative_square(moving_color, to));
@@ -925,13 +928,8 @@ template<class Layout>
     }
 
     if (move_is_castle(move)) {
-        const bool king_side = move_flag(move) == MOVE_OO;
-        const Square rook_from = moving_color == WHITE
-            ? static_cast<Square>(king_side ? 7 : 0)
-            : static_cast<Square>(king_side ? 63 : 56);
-        const Square rook_to = moving_color == WHITE
-            ? static_cast<Square>(king_side ? 5 : 3)
-            : static_cast<Square>(king_side ? 61 : 59);
+        const Square rook_from = encoded_to;
+        const Square rook_to = castling_rook_to(moving_color, move_flag(move));
         const Piece rook = make_piece(moving_color, ROOK);
         append_p2_feature<Layout>(move_diff, buckets, rook, rook_from, false);
         append_p2_feature<Layout>(move_diff, buckets, rook, rook_to, true);

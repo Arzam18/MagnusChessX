@@ -1115,56 +1115,60 @@ inline Move* generate_ep_evasions(
     return out;
 }
 
+[[nodiscard]] inline bool castling_is_pseudo_legal(
+    const Position& pos,
+    const memory::Memory& mem,
+    const GenInfo& info,
+    u16 flag,
+    Square expected_rook_from = NO_SQ
+) noexcept {
+    if (info.in_check)
+        return false;
+
+    const int right = castling_right(info.us, flag);
+    if ((pos.castling_rights & right) == 0)
+        return false;
+
+    const Square king_from = info.king_sq;
+    const Square rook_from = pos.castling_rook_square[right];
+    if (!is_ok(king_from) || !is_ok(rook_from) ||
+        (expected_rook_from != NO_SQ && expected_rook_from != rook_from) ||
+        piece_on(pos, king_from) != make_piece(info.us, KING) ||
+        piece_on(pos, rook_from) != make_piece(info.us, ROOK) ||
+        (info.occupied & pos.castling_path[right]) != 0ULL) {
+        return false;
+    }
+
+    const Square king_to = castling_king_to(info.us, flag);
+    if (king_to != king_from) {
+        const int step = king_to > king_from ? -1 : 1;
+        for (Square sq = king_to; sq != king_from; sq += step) {
+            if (square_attacked_by_them(pos, mem, info, sq))
+                return false;
+        }
+    }
+
+    // A Chess960 rook can be the sole blocker between its king and an enemy
+    // slider. Moving that rook would expose a check even if the king path
+    // appears safe in the original occupancy.
+    return (info.pinned & bb_of(rook_from)) == 0ULL;
+}
+
 inline Move* generate_castling_non_evasions(
     const Position& pos,
     const memory::Memory& mem,
     const GenInfo& info,
     Move* out
 ) noexcept {
-    // King must never castle while in check
-    if (info.in_check)
-        return out;
-
-    if (info.us == WHITE) {
-        // White O-O: e1 -> g1, rook h1 -> f1
-        if ((pos.castling_rights & WHITE_OO) &&
-            piece_on(pos, 4) == W_KING &&
-            piece_on(pos, 7) == W_ROOK &&
-            !(info.occupied & (bb_of(5) | bb_of(6))) &&
-            !square_attacked_by_them(pos, mem, info, 5) &&
-            !square_attacked_by_them(pos, mem, info, 6)) {
-            *out++ = make_move(4, 6, MOVE_OO);
-        }
-
-        // White O-O-O: e1 -> c1, rook a1 -> d1
-        if ((pos.castling_rights & WHITE_OOO) &&
-            piece_on(pos, 4) == W_KING &&
-            piece_on(pos, 0) == W_ROOK &&
-            !(info.occupied & (bb_of(1) | bb_of(2) | bb_of(3))) &&
-            !square_attacked_by_them(pos, mem, info, 3) &&
-            !square_attacked_by_them(pos, mem, info, 2)) {
-            *out++ = make_move(4, 2, MOVE_OOO);
-        }
-    } else {
-        // Black O-O: e8 -> g8, rook h8 -> f8
-        if ((pos.castling_rights & BLACK_OO) &&
-            piece_on(pos, 60) == B_KING &&
-            piece_on(pos, 63) == B_ROOK &&
-            !(info.occupied & (bb_of(61) | bb_of(62))) &&
-            !square_attacked_by_them(pos, mem, info, 61) &&
-            !square_attacked_by_them(pos, mem, info, 62)) {
-            *out++ = make_move(60, 62, MOVE_OO);
-        }
-
-        // Black O-O-O: e8 -> c8, rook a8 -> d8
-        if ((pos.castling_rights & BLACK_OOO) &&
-            piece_on(pos, 60) == B_KING &&
-            piece_on(pos, 56) == B_ROOK &&
-            !(info.occupied & (bb_of(57) | bb_of(58) | bb_of(59))) &&
-            !square_attacked_by_them(pos, mem, info, 59) &&
-            !square_attacked_by_them(pos, mem, info, 58)) {
-            *out++ = make_move(60, 58, MOVE_OOO);
-        }
+    for (const u16 flag : {u16(MOVE_OO), u16(MOVE_OOO)}) {
+        if (!castling_is_pseudo_legal(pos, mem, info, flag))
+            continue;
+        const int right = castling_right(info.us, flag);
+        *out++ = make_move(
+            info.king_sq,
+            pos.castling_rook_square[right],
+            flag
+        );
     }
 
     return out;
@@ -1346,61 +1350,10 @@ namespace {
     const GenInfo& info,
     Move move
 ) noexcept {
-    if (info.in_check)
-        return false;
-
     const Square from = from_sq(move);
     const Square to = to_sq(move);
-
-    if (info.us == WHITE) {
-        if (move_flag(move) == MOVE_OO) {
-            return from == 4 &&
-                to == 6 &&
-                piece_on(pos, 4) == W_KING &&
-                piece_on(pos, 7) == W_ROOK &&
-                (pos.castling_rights & WHITE_OO) != 0 &&
-                !(info.occupied & (bb_of(5) | bb_of(6))) &&
-                !square_attacked_by_them(pos, mem, info, 5) &&
-                !square_attacked_by_them(pos, mem, info, 6);
-        }
-
-        if (move_flag(move) == MOVE_OOO) {
-            return from == 4 &&
-                to == 2 &&
-                piece_on(pos, 4) == W_KING &&
-                piece_on(pos, 0) == W_ROOK &&
-                (pos.castling_rights & WHITE_OOO) != 0 &&
-                !(info.occupied & (bb_of(1) | bb_of(2) | bb_of(3))) &&
-                !square_attacked_by_them(pos, mem, info, 3) &&
-                !square_attacked_by_them(pos, mem, info, 2);
-        }
-
-        return false;
-    }
-
-    if (move_flag(move) == MOVE_OO) {
-        return from == 60 &&
-            to == 62 &&
-            piece_on(pos, 60) == B_KING &&
-            piece_on(pos, 63) == B_ROOK &&
-            (pos.castling_rights & BLACK_OO) != 0 &&
-            !(info.occupied & (bb_of(61) | bb_of(62))) &&
-            !square_attacked_by_them(pos, mem, info, 61) &&
-            !square_attacked_by_them(pos, mem, info, 62);
-    }
-
-    if (move_flag(move) == MOVE_OOO) {
-        return from == 60 &&
-            to == 58 &&
-            piece_on(pos, 60) == B_KING &&
-            piece_on(pos, 56) == B_ROOK &&
-            (pos.castling_rights & BLACK_OOO) != 0 &&
-            !(info.occupied & (bb_of(57) | bb_of(58) | bb_of(59))) &&
-            !square_attacked_by_them(pos, mem, info, 59) &&
-            !square_attacked_by_them(pos, mem, info, 58);
-    }
-
-    return false;
+    return from == info.king_sq &&
+        castling_is_pseudo_legal(pos, mem, info, move_flag(move), to);
 }
 
 [[nodiscard]] inline bool pseudo_legal_king_step_fast(
@@ -1822,22 +1775,16 @@ bool move_gives_check(
     }
 
     if (move_flag(move) == MOVE_OO || move_flag(move) == MOVE_OOO) {
-        occupied |= to_bb;
-        kings |= to_bb;
-
-        const Square rook_from =
-            us == WHITE
-                ? (move_flag(move) == MOVE_OO ? 7 : 0)
-                : (move_flag(move) == MOVE_OO ? 63 : 56);
-        const Square rook_to =
-            us == WHITE
-                ? (move_flag(move) == MOVE_OO ? 5 : 3)
-                : (move_flag(move) == MOVE_OO ? 61 : 59);
+        const Square rook_from = to;
+        const Square king_to = castling_king_to(us, move_flag(move));
+        const Square rook_to = castling_rook_to(us, move_flag(move));
         const Bitboard rook_from_bb = bb_of(rook_from);
+        const Bitboard king_to_bb = bb_of(king_to);
         const Bitboard rook_to_bb = bb_of(rook_to);
 
-        occupied ^= rook_from_bb;
-        occupied |= rook_to_bb;
+        occupied &= ~rook_from_bb;
+        occupied |= king_to_bb | rook_to_bb;
+        kings |= king_to_bb;
         rook_like ^= rook_from_bb;
         rook_like |= rook_to_bb;
     } else if (move_is_ep(move)) {

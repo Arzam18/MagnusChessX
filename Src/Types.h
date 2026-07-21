@@ -126,7 +126,8 @@ enum CastlingRight : int {
 
     WHITE_CASTLING = WHITE_OO | WHITE_OOO,   // All white castling
     BLACK_CASTLING = BLACK_OO | BLACK_OOO,   // All black castling
-    ANY_CASTLING   = WHITE_CASTLING | BLACK_CASTLING  // All castling
+    ANY_CASTLING   = WHITE_CASTLING | BLACK_CASTLING, // All castling
+    CASTLING_RIGHT_NB = 16
 };
 
 constexpr Square NO_SQ = -1;    // Represents "no square" (used when en-passant does not exist)

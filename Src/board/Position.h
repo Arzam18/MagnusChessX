@@ -36,11 +36,15 @@ struct Position {
     int side_to_move = WHITE;
     Square ep_sq = NO_SQ;
     int castling_rights = 0;
+    bool chess960 = false;
     int halfmove_clock = 0;
     int fullmove_number = 1;
     int plies_from_null = 0;
 
     Square king_sq[COLOR_NB]{ NO_SQ, NO_SQ };
+    std::array<u8, SQ_NB> castling_rights_mask{};
+    std::array<Square, CASTLING_RIGHT_NB> castling_rook_square{};
+    std::array<Bitboard, CASTLING_RIGHT_NB> castling_path{};
 
     Bitboard color_bb[COLOR_NB]{};
     Bitboard piece_bb[PIECE_NB]{};
@@ -156,6 +160,12 @@ void position_recompute_occupied(Position& pos) noexcept;
 void position_refresh_king_squares(Position& pos) noexcept;
 [[nodiscard]] Key position_compute_key(const Position& pos, const Tables& tables) noexcept;
 void position_refresh_key(Position& pos, const Tables& tables) noexcept;
+
+[[nodiscard]] bool position_set_castling_right(
+    Position& pos,
+    Color color,
+    Square rook_from
+) noexcept;
 
 void position_put_piece(
     Position& pos,

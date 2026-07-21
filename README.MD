@@ -19,7 +19,7 @@ or install it into a UCI-compatible graphical user interface, like [En Croissant
 
 The default network line is P2 MNUE, maintained separately in [MagnusMNUE](https://github.com/TMagnusN/MagnusMNUE). P2 is the normal evaluation path used by ordinary search. MagnusChessX also contains an experimental X2-K16-pawn MNUE path, used to test a less conventional layout with separated piece, attack-edge, and pawn-pair feature families. X2 is included because its structure is interesting, not because it is advertised as the current strength target.
 
-MagnusChessX does not support Chess960. It probes [Syzygy tablebases][syzygy-link] up to 7 pieces through the vendored [Fathom](https://github.com/jdart1/Fathom) backend.
+MagnusChessX supports Chess960 through `setoption name UCI_Chess960 value true`. Position input accepts standard FEN castling tags, X-FEN, and Shredder-FEN file letters. In normal UCI mode castling uses the king destination (`e1g1`); in Chess960 mode it uses the participating rook square (`e1h1`). The engine probes [Syzygy tablebases][syzygy-link] up to 7 pieces through the vendored [Fathom](https://github.com/jdart1/Fathom) backend once no castling rights remain.
 
 PS: MagnusChessX's MNUE design learned a few architectural lessons from [Reckless](https://github.com/codedeliveryservice/Reckless).
 

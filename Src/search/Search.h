@@ -468,7 +468,7 @@ struct SearchResult {
  *   A UCI string in the form "e2e4" or "e7e8q" (promotion)
  *   If m is a null move (0), returns "0000"
  */
-[[nodiscard]] std::string move_to_uci(Move m);
+[[nodiscard]] std::string move_to_uci(Move m, bool chess960);
 
 /*
  * iterative_deepening — search entry point

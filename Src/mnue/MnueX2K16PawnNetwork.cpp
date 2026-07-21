@@ -2363,16 +2363,24 @@ void dump_vector(
     return result;
 }
 
-[[nodiscard]] std::string castling_to_fen(int rights) {
+[[nodiscard]] std::string castling_to_fen(const Position& pos) {
     std::string result;
-    if ((rights & WHITE_OO) != 0)
-        result.push_back('K');
-    if ((rights & WHITE_OOO) != 0)
-        result.push_back('Q');
-    if ((rights & BLACK_OO) != 0)
-        result.push_back('k');
-    if ((rights & BLACK_OOO) != 0)
-        result.push_back('q');
+    const auto append = [&](int right, char standard) {
+        if ((pos.castling_rights & right) == 0)
+            return;
+        if (!pos.chess960) {
+            result.push_back(standard);
+            return;
+        }
+        const char base = right == WHITE_OO || right == WHITE_OOO ? 'A' : 'a';
+        result.push_back(static_cast<char>(
+            base + file_of_sq(pos.castling_rook_square[right])
+        ));
+    };
+    append(WHITE_OO, 'K');
+    append(WHITE_OOO, 'Q');
+    append(BLACK_OO, 'k');
+    append(BLACK_OOO, 'q');
     return result.empty() ? "-" : result;
 }
 
@@ -2400,7 +2408,7 @@ void dump_vector(
     }
 
     fen += pos.side_to_move == WHITE ? " w " : " b ";
-    fen += castling_to_fen(pos.castling_rights);
+    fen += castling_to_fen(pos);
     fen.push_back(' ');
     fen += square_to_fen(pos.ep_sq);
     fen.push_back(' ');
@@ -2425,10 +2433,20 @@ void dump_vector(
     }
 }
 
-[[nodiscard]] std::string move_to_simple_uci(Move move) {
+[[nodiscard]] std::string move_to_simple_uci(
+    const Position& pos,
+    Move move
+) {
     std::string text;
     text += square_to_fen(from_sq(move));
-    text += square_to_fen(to_sq(move));
+    Square destination = to_sq(move);
+    if (move_is_castle(move) && !pos.chess960) {
+        destination = castling_king_to(
+            static_cast<Color>(pos.side_to_move),
+            move_flag(move)
+        );
+    }
+    text += square_to_fen(destination);
     if (move_is_promotion(move))
         text.push_back(promotion_char(move));
     return text;
@@ -3513,7 +3531,7 @@ void debug_incremental_stress(
             state,
             backend
         );
-        last_move = move_to_simple_uci(move);
+        last_move = move_to_simple_uci(before, move);
     }
 
     output << "info string x2 incstress positions "

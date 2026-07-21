@@ -258,6 +258,7 @@ endif
 PROFGEN_OUTPUT := $(BUILD_DIR)/$(TARGET)-$(EFFECTIVE_PROFILE)-profgen$(EXEEXT)
 TIME_TEST_OUTPUT := $(BUILD_DIR)/TimeManagementTests-$(EFFECTIVE_PROFILE)$(EXEEXT)
 SEARCH_REFERENCE_TEST_OUTPUT := $(BUILD_DIR)/SearchReferenceTests-$(EFFECTIVE_PROFILE)$(EXEEXT)
+CHESS960_TEST_OUTPUT := $(BUILD_DIR)/Chess960Tests-$(EFFECTIVE_PROFILE)$(EXEEXT)
 
 ifeq ($(PGO),1)
 	AUTO_BUILD_TARGET := profile-build
@@ -281,7 +282,7 @@ endif
 
 .PHONY: all auto portable64 native64 avx2+bmi2 avx512+bmi2 variants cpu-variants detect build release releases \
 	pgo profile-build pgo-step1 pgo-step2 pgo-step3 \
-	pgo-generate-build pgo-use-build run time-test search-reference-test \
+	pgo-generate-build pgo-use-build run time-test search-reference-test chess960-test \
 	clean objclean pgo-clean distclean
 
 all: auto
@@ -432,6 +433,14 @@ $(SEARCH_REFERENCE_TEST_OUTPUT): tests/SearchReferenceTests.cpp $(filter-out $(O
 search-reference-test: $(SEARCH_REFERENCE_TEST_OUTPUT)
 	$(SEARCH_REFERENCE_TEST_OUTPUT)
 
+$(CHESS960_TEST_OUTPUT): tests/Chess960Tests.cpp $(filter-out $(OBJ_DIR)/Main.o $(OBJ_DIR)/Uci.o,$(OBJ)) | $(OBJ_DIR)
+	$(CXX) $(BASE_CXXFLAGS) tests/Chess960Tests.cpp \
+		$(filter-out $(OBJ_DIR)/Main.o $(OBJ_DIR)/Uci.o,$(OBJ)) \
+		-o $@ $(BASE_LDFLAGS) $(LDLIBS)
+
+chess960-test: $(CHESS960_TEST_OUTPUT)
+	$(CHESS960_TEST_OUTPUT)
+
 objclean:
 	$(call RMDIR_R,$(OBJ_DIR))
 
@@ -455,6 +464,8 @@ clean:
 	$(call RM_F,$(BUILD_DIR)/$(TARGET)-avx512+bmi2-pgo$(EXEEXT))
 	$(call RM_F,$(BUILD_DIR)/TimeManagementTests-portable64$(EXEEXT))
 	$(call RM_F,$(BUILD_DIR)/TimeManagementTests-native64$(EXEEXT))
+	$(call RM_F,$(BUILD_DIR)/Chess960Tests-portable64$(EXEEXT))
+	$(call RM_F,$(BUILD_DIR)/Chess960Tests-native64$(EXEEXT))
 
 distclean: clean
 	$(call RMDIR_R,$(BUILD_DIR)/pgo)
