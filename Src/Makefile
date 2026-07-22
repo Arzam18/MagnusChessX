@@ -45,6 +45,7 @@ OBJ_VARIANT ?= normal
 OBJ_DIR := $(BUILD_DIR)/obj/$(EFFECTIVE_PROFILE)/$(OBJ_VARIANT)
 PGO_DIR := $(BUILD_DIR)/pgo/$(EFFECTIVE_PROFILE)
 PGO_BENCH_LOG := $(PGO_DIR)/bench.log
+# The normal bench contains both classical and Chess960 search positions.
 PGO_BENCH_ARGS ?= bench
 
 SRC := \

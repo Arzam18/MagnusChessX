@@ -118,6 +118,12 @@ bool capture_stage(Move move) noexcept {
         || (move_is_promotion(move) && promo_piece(move) == QUEEN);
 }
 
+bool is_search_quiet(Move move) noexcept {
+    return !move_is_none(move)
+        && !move_is_capture(move)
+        && !move_is_promotion(move);
+}
+
 bool is_shuffling(
     Move move,
     const Position& pos,
@@ -2327,11 +2333,7 @@ struct Searcher {
         Move move,
         PieceType piece
     ) noexcept {
-        if (move_is_none(move) ||
-            move_is_capture(move) ||
-            move_is_promotion(move) ||
-            move_is_castle(move) ||
-            !is_ok(piece)) {
+        if (!is_search_quiet(move) || !is_ok(piece)) {
             return 0;
         }
         return static_cast<std::size_t>(
@@ -3808,10 +3810,7 @@ struct Searcher {
             ++legal_count;
             const bool capture_move = move_is_capture(move);
             const bool bad_capture = picker.last_was_bad_capture();
-            const bool quiet_move =
-                !capture_move &&
-                !move_is_promotion(move) &&
-                !move_is_castle(move);
+            const bool quiet_move = is_search_quiet(move);
             const bool simple_capture =
                 capture_move &&
                 !move_is_promotion(move);

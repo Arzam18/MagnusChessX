@@ -127,6 +127,7 @@ private:
     return required_gap < 1 ? 1 : required_gap;
 }
 [[nodiscard]] bool capture_stage(Move move) noexcept;
+[[nodiscard]] bool is_search_quiet(Move move) noexcept;
 [[nodiscard]] bool is_shuffling(
     Move move,
     const Position& pos,

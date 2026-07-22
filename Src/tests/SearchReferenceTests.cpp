@@ -97,6 +97,21 @@ void test_shuffling_truth_table() {
     expect(!shuffling(magnus::make_move(3, 4, MOVE_QUIET)), "return squares");
 }
 
+void test_search_move_classification() {
+    const Move quiet = magnus::make_move(1, 18, MOVE_QUIET);
+    const Move capture = magnus::make_move(1, 18, MOVE_CAPTURE);
+    const Move castle_king_side = magnus::make_move(4, 7, MOVE_OO);
+    const Move castle_queen_side = magnus::make_move(4, 0, MOVE_OOO);
+    const Move promotion = magnus::make_move(48, 56, MOVE_PROMO_Q);
+
+    expect(search::is_search_quiet(quiet), "ordinary quiet classification");
+    expect(search::is_search_quiet(castle_king_side), "king-side castle is quiet");
+    expect(search::is_search_quiet(castle_queen_side), "queen-side castle is quiet");
+    expect(!search::is_search_quiet(capture), "capture is not quiet");
+    expect(!search::is_search_quiet(promotion), "promotion is not quiet");
+    expect(!search::is_search_quiet(Move(0)), "null move is not quiet");
+}
+
 void test_depth_transitions() {
     const int original_node_depth = 10;
     const int move_base_depth = original_node_depth - 1;
@@ -232,6 +247,7 @@ void test_persistent_worker_slots() {
 int main() {
     test_plies_from_null();
     test_shuffling_truth_table();
+    test_search_move_classification();
     test_depth_transitions();
     test_tt_trust_required_gap();
     test_see_ignores_pinned_recapture();

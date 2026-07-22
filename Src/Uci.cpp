@@ -203,6 +203,19 @@ constexpr std::array<std::string_view, 50> SEARCH_BENCH_FENS{{
     "rn2k2r/ppq2p1p/2ppbp2/2b1p3/2B1P2N/3P4/PPP2PPP/RN1Q1RK1 w kq - 2 9",
 }};
 
+// Chess960 positions are kept in the normal bench so the same workload used
+// for regression checks also trains the PGO build. The first two mirror the
+// Stockfish bench (the first is stored after its move sequence); the remaining
+// positions make a Chess960 castle immediately available and exercise overlap
+// cases where a king destination or rook destination is already occupied by
+// the participating rook.
+constexpr std::array<std::string_view, 4> SEARCH_BENCH_FRC_FENS{{
+    "bb1n1rkr/ppp1Q1pp/3n1p2/3p4/3P4/6Pq/PPP1PP1P/BB1NNRKR w HFhf - 0 5",
+    "nqbnrkrb/pppppppp/8/8/8/8/PPPPPPPP/NQBNRKRB w KQkq - 0 1",
+    "bb1rknrq/pppppppp/8/5N2/2P5/3P4/nP2PPPP/BBNRK1RQ w GDgd - 0 5",
+    "rbk2r1q/1ppbpnpp/3p1p1n/p7/1P2PP1P/6P1/P1PP4/RBKNBRNQ b FAfa - 2 7",
+}};
+
 [[nodiscard]] const std::string& get_executable_dir() {
     static const std::string dir = []() -> std::string {
 #ifdef _WIN32
@@ -771,15 +784,19 @@ struct SearchBenchResult {
 
     if (!quiet) {
         out << "--------------------------------------------------\n";
-        out << "          Nodes       Elapsed             NPS\n";
+        out << "      Variant       Nodes       Elapsed             NPS\n";
         out << "--------------------------------------------------\n";
     }
 
-    for (std::size_t i = 0; i < SEARCH_BENCH_FENS.size(); ++i) {
+    std::size_t position_index = 0;
+    const auto run_position = [&](std::string_view fen, bool chess960) {
         Position bench_pos{};
-        const std::string_view fen = SEARCH_BENCH_FENS[i];
-        if (!parse_fen(bench_pos, mem, fen))
+        if (!parse_fen(bench_pos, mem, fen, chess960)) {
+            out << "info string invalid "
+                << (chess960 ? "FRC" : "classical")
+                << " bench position " << position_index << '\n';
             return false;
+        }
 
         search::SearchLimits limits{};
         limits.depth = depth;
@@ -805,16 +822,27 @@ struct SearchBenchResult {
         checksum = (checksum * 1315423911ULL)
             ^ res.search.nodes
             ^ (static_cast<u64>(res.search.best_move) << 32)
-            ^ static_cast<u64>(static_cast<unsigned>(res.search.score));
+            ^ static_cast<u64>(static_cast<unsigned>(res.search.score))
+            ^ (static_cast<u64>(chess960) << 63);
 
         if (!quiet) {
-            out << std::setw(3) << i
+            out << std::setw(3) << position_index
+                << std::setw(9) << (chess960 ? "frc" : "classic")
                 << std::setw(12) << res.search.nodes
                 << std::setw(13) << std::fixed << std::setprecision(3)
                 << res.seconds << "s"
                 << std::setw(16) << res.nps << " N/s\n";
         }
-    }
+        ++position_index;
+        return true;
+    };
+
+    for (const std::string_view fen : SEARCH_BENCH_FENS)
+        if (!run_position(fen, false))
+            return false;
+    for (const std::string_view fen : SEARCH_BENCH_FRC_FENS)
+        if (!run_position(fen, true))
+            return false;
 
     const u64 total_nps = total_seconds > 0.0
         ? static_cast<u64>(static_cast<double>(total_nodes) / total_seconds)
@@ -834,11 +862,15 @@ struct SearchBenchResult {
             << (eval_kind == search::SearchEvalKind::X2K16
                 ? search_eval_kind_name(eval_kind)
                 : mnue::p2_eval_name())
+            << " positions " << position_index
+            << " frc " << SEARCH_BENCH_FRC_FENS.size()
             << " checksum " << checksum
             << '\n';
     }
 
-    out << "Bench: " << total_nodes << " nodes " << total_nps << " nps\n";
+    out << "Bench: " << total_nodes << " nodes " << total_nps
+        << " nps positions " << position_index
+        << " frc " << SEARCH_BENCH_FRC_FENS.size() << '\n';
     return true;
 }
 
