@@ -174,7 +174,9 @@ struct QuietHistoryTable {
 };
 
 struct CaptureHistoryTable {
-    i16 value[COLOR_NB][PIECE_TYPE_NB][SQ_NB][PIECE_TYPE_NB]{};
+    static constexpr int THREAT_BUCKET_NB =
+        SearchComponents::threat_capture_history ? 4 : 1;
+    i16 value[COLOR_NB][PIECE_TYPE_NB][SQ_NB][PIECE_TYPE_NB][THREAT_BUCKET_NB]{};
 };
 
 struct CounterMoveTable {
@@ -198,6 +200,18 @@ constexpr int CONTINUATION_PLY4_SLOT = 1;
 constexpr int CONTINUATION_PLY8_SLOT = 2;
 constexpr i32 HISTORY_VALUE_LIMIT = 32767;
 constexpr i32 SEE_BIAS_VALUE_LIMIT = 2048;
+
+[[nodiscard]] inline constexpr int capture_threat_bucket(
+    Bitboard threats,
+    Move move
+) noexcept {
+    if constexpr (!SearchComponents::threat_capture_history)
+        return 0;
+
+    const int from_threatened = (threats & bb_of(from_sq(move))) != 0ULL ? 1 : 0;
+    const int to_threatened = (threats & bb_of(to_sq(move))) != 0ULL ? 1 : 0;
+    return from_threatened | (to_threatened << 1);
+}
 
 inline void update_history_value(
     i16& value,
@@ -278,14 +292,19 @@ struct HistoryTables {
         const Color side = static_cast<Color>(pos.side_to_move);
         return quiet.value[side][from_sq(move)][to_sq(move)];
     }
-    [[nodiscard]] inline i32 capture_value_fast(const Position& pos, Move move) const noexcept {
+    [[nodiscard]] inline i32 capture_value_fast(
+        const Position& pos,
+        Move move,
+        Bitboard threats
+    ) const noexcept {
         if (!move_is_capture(move))
             return 0;
 
         const Color side = static_cast<Color>(pos.side_to_move);
         const PieceType mover = piece_type_on(pos, from_sq(move));
         const PieceType captured = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
-        return capture.value[side][mover][to_sq(move)][captured];
+        const int bucket = capture_threat_bucket(threats, move);
+        return capture.value[side][mover][to_sq(move)][captured][bucket];
     }
     [[nodiscard]] inline i32 see_bias_value_fast(int depth, int see_value) const noexcept {
         const int dc = static_cast<int>(depth_class(depth));
@@ -391,13 +410,14 @@ struct HistoryTables {
         const Position& pos,
         Move move,
         int depth,
-        int see_value
+        int see_value,
+        Bitboard threats
     ) const noexcept {
         if (!move_is_capture(move))
             return 0;
 
         i32 score = 0;
-        score += MAGNUS_CAPTURE_HISTORY_WEIGHT * capture_value_fast(pos, move);
+        score += MAGNUS_CAPTURE_HISTORY_WEIGHT * capture_value_fast(pos, move, threats);
         score += MAGNUS_CAPTURE_IMM_SEE_WEIGHT
             * see_immediate_term(see_value, HISTORY_ORDERING_SEE_TERM_PRESET);
         score += MAGNUS_CAPTURE_SEE_BIAS_WEIGHT * see_bias_value_fast(depth, see_value);
@@ -420,24 +440,36 @@ struct HistoryTables {
         i16& h = quiet.value[side][from_sq(move)][to_sq(move)];
         update_history_value(h, -history_penalty(depth));
     }
-    inline void bonus_capture_fast(const Position& pos, Move move, int depth) noexcept {
+    inline void bonus_capture_fast(
+        const Position& pos,
+        Move move,
+        int depth,
+        Bitboard threats
+    ) noexcept {
         if (!move_is_capture(move))
             return;
 
         const Color side = static_cast<Color>(pos.side_to_move);
         const PieceType mover = piece_type_on(pos, from_sq(move));
         const PieceType captured = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
-        i16& h = capture.value[side][mover][to_sq(move)][captured];
+        const int bucket = capture_threat_bucket(threats, move);
+        i16& h = capture.value[side][mover][to_sq(move)][captured][bucket];
         update_history_value(h, history_bonus(depth));
     }
-    inline void penalty_capture_fast(const Position& pos, Move move, int depth) noexcept {
+    inline void penalty_capture_fast(
+        const Position& pos,
+        Move move,
+        int depth,
+        Bitboard threats
+    ) noexcept {
         if (!move_is_capture(move))
             return;
 
         const Color side = static_cast<Color>(pos.side_to_move);
         const PieceType mover = piece_type_on(pos, from_sq(move));
         const PieceType captured = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
-        i16& h = capture.value[side][mover][to_sq(move)][captured];
+        const int bucket = capture_threat_bucket(threats, move);
+        i16& h = capture.value[side][mover][to_sq(move)][captured][bucket];
         update_history_value(h, -history_penalty(depth));
     }
     inline void bonus_see_bias_fast(int depth, int see_value) noexcept {
@@ -531,11 +563,12 @@ struct HistoryTables {
         const Move* caps,
         int count,
         Move excluded_move,
-        int depth
+        int depth,
+        Bitboard threats
     ) noexcept {
         for (int i = 0; i < count; ++i)
             if (caps[i] != excluded_move)
-                penalty_capture_fast(pos, caps[i], depth);
+                penalty_capture_fast(pos, caps[i], depth, threats);
     }
     inline void penalize_continuation_quiets_fast(
         const Position& pos,
@@ -614,10 +647,11 @@ struct HistoryTables {
         Move prev_move = Move(0),
         ContinuationHistoryContext prev2 = {},
         ContinuationHistoryContext prev4 = {},
-        ContinuationHistoryContext prev8 = {}
+        ContinuationHistoryContext prev8 = {},
+        Bitboard capture_threats = 0ULL
     ) noexcept {
         if (move_is_capture(move)) {
-            bonus_capture_fast(pos, move, depth);
+            bonus_capture_fast(pos, move, depth, capture_threats);
             bonus_see_bias_fast(depth, capture_see_value);
             return;
         }

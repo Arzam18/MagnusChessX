@@ -105,6 +105,9 @@ Important parameters:
 --name NAME          net id, output directory name, checkpoint prefix
 --data PATH          training .data or .binpack file; repeatable
 --data-dir DIR       directory of .binpack chunks; repeatable
+--chunk-shuffle-seed N deterministic file and position shuffle seed
+--chunk-virtual-epochs N number of shuffled passes scheduled per pool
+--chunk-sample N     optional number of distinct files selected per virtual epoch
 --positions N        total training positions
 --batch-size N       positions per GPU batch
 --threads N          CPU data-prep threads
@@ -114,6 +117,8 @@ Important parameters:
 --l0-init-scale X    multiplier for l0 weight init stdev
 --save-sb N          save one checkpoint every N superbatches
 --save-rate N        alias for --save-sb
+--resume-from PATH   checkpoint directory whose optimiser state should be loaded
+--start-superbatch N first superbatch to train after loading a checkpoint
 --output-dir PATH    checkpoint root, default runs/<name>
 --net-dir PATH       exported .mnue directory, default nets/mnue
 ```
@@ -121,12 +126,63 @@ Important parameters:
 Training input is required. Use either one or more `--data` paths, or one or
 more `--data-dir` directories containing `.binpack` chunks.
 
+For multi-file `.binpack` input, the loader opens the files selected for one
+virtual epoch together and interleaves 16,384-position stripes according to
+each file's compressed-byte progress. This keeps differently sized sources
+spread across the epoch instead of draining one multi-million-position file at
+a time. The 256 MiB position shuffle uses a persistent RNG derived from
+`--chunk-shuffle-seed`, so consecutive buffers do not receive the same
+permutation. Parallel conversion is joined in source order, making the stream
+replayable with the same paths and seed.
+
+Checkpoints created by the older sequential-file loader remain loadable, but
+resuming one with the interleaved loader is not a data-stream-equivalent
+continuation. Start a new run name when comparing training quality across this
+loader change.
+
 Outputs:
 
 ```text
 runs/<name>/<name>-<superbatch>/quantised.bin
 nets/mnue/<name>-<superbatch>.mnue
 ```
+
+### Resume an Interrupted Run
+
+Checkpoints contain the model weights plus the optimiser momentum and velocity.
+Resume with the original run name, output directory, total position count,
+superbatch count, and learning-rate settings. Point `--resume-from` at the last
+complete checkpoint and set `--start-superbatch` to the next one:
+
+```powershell
+cargo run --manifest-path Tools/mnue_p2_trainer/Cargo.toml --release --features cuda -- `
+  --arch p2 `
+  --name mnue_p2_generated_829m_5x_20sb `
+  --data-dir D:\NNUE\data\Stockfish-tools\generated `
+  --chunk-shuffle-seed 1 `
+  --chunk-virtual-epochs 6 `
+  --positions 829681110 `
+  --batch-size 32768 `
+  --threads 20 `
+  --superbatches 20 `
+  --save-sb 1 `
+  --lr 0.001 `
+  --lr-final 0.0000625 `
+  --l0-init-scale 0.25 `
+  --resume-from D:\MagnusChessX\runs\mnue_p2_generated_829m_5x_20sb\mnue_p2_generated_829m_5x_20sb-9 `
+  --start-superbatch 10
+```
+
+The trainer validates the optimiser-state files before initialising training,
+skips the positions belonging to completed superbatches, preserves the
+absolute learning-rate schedule, and refuses to overwrite checkpoint
+directories at or after `--start-superbatch`.
+
+The batch size may be reduced for a resume only when the effective positions
+per superbatch remain unchanged. In the example, `65536 * 633` and
+`32768 * 1266` both equal `41,484,288` positions per superbatch.
+Reducing the batch size still increases the number of optimiser updates per
+position; it is a stability workaround, not a bit-equivalent continuation.
 
 ## Embedded Network Sync
 

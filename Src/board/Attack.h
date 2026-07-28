@@ -182,6 +182,13 @@ AttackBitboard rook_attacks_fast(
     AttackBitboard occupied
 ) noexcept;
 
+AttackBitboard slider_attacks_union_fast(
+    const memory::Memory& mem,
+    AttackBitboard diagonal_sliders,
+    AttackBitboard orthogonal_sliders,
+    AttackBitboard occupied
+) noexcept;
+
 inline AttackBitboard queen_attacks_fast(
     const memory::Memory& mem,
     int sq,

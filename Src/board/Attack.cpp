@@ -743,6 +743,76 @@ AttackBitboard rook_attacks_fast(
 
 namespace {
 
+template<
+    AttackBitboard (*BishopAttack)(
+        const memory::Memory&, int, AttackBitboard
+    ) noexcept,
+    AttackBitboard (*RookAttack)(
+        const memory::Memory&, int, AttackBitboard
+    ) noexcept
+>
+AttackBitboard slider_attacks_union_impl(
+    const memory::Memory& mem,
+    AttackBitboard diagonal_sliders,
+    AttackBitboard orthogonal_sliders,
+    AttackBitboard occupied
+) noexcept {
+    AttackBitboard attacks = 0ULL;
+    while (diagonal_sliders) {
+        const int sq = static_cast<int>(std::countr_zero(diagonal_sliders));
+        diagonal_sliders &= diagonal_sliders - 1;
+        attacks |= BishopAttack(mem, sq, occupied);
+    }
+    while (orthogonal_sliders) {
+        const int sq = static_cast<int>(std::countr_zero(orthogonal_sliders));
+        orthogonal_sliders &= orthogonal_sliders - 1;
+        attacks |= RookAttack(mem, sq, occupied);
+    }
+    return attacks;
+}
+
+} // namespace
+
+AttackBitboard slider_attacks_union_fast(
+    const memory::Memory& mem,
+    AttackBitboard diagonal_sliders,
+    AttackBitboard orthogonal_sliders,
+    AttackBitboard occupied
+) noexcept {
+    if (g_attack_backend.kind == AttackBackendKind::PEXT) {
+#if MAGNUS_CAN_COMPILE_PEXT
+        return slider_attacks_union_impl<
+            bishop_attacks_pext,
+            rook_attacks_pext
+        >(mem, diagonal_sliders, orthogonal_sliders, occupied);
+#else
+        return slider_attacks_union_impl<
+            bishop_attacks_magic,
+            rook_attacks_magic
+        >(mem, diagonal_sliders, orthogonal_sliders, occupied);
+#endif
+    }
+
+    if (g_attack_backend.kind == AttackBackendKind::MAGIC)
+        return slider_attacks_union_impl<
+            bishop_attacks_magic,
+            rook_attacks_magic
+        >(mem, diagonal_sliders, orthogonal_sliders, occupied);
+
+    if (g_attack_backend.kind == AttackBackendKind::TABLE)
+        return slider_attacks_union_impl<
+            bishop_attacks_table,
+            rook_attacks_table
+        >(mem, diagonal_sliders, orthogonal_sliders, occupied);
+
+    return slider_attacks_union_impl<
+        bishop_attacks_classical,
+        rook_attacks_classical
+    >(mem, diagonal_sliders, orthogonal_sliders, occupied);
+}
+
+namespace {
+
 AttackBitboard scan_empty_ray(
     int sq,
     int rank_delta,

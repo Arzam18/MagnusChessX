@@ -1025,6 +1025,10 @@ struct Searcher {
         u64 q_high_hist_tried = 0;
         u64 q_high_hist_cutoff = 0;
 
+        u64 threat_bucket_tried[4]{};
+        u64 threat_bucket_cutoff[4]{};
+        i64 threat_bucket_history_sum[4]{};
+
         i64 topk_rank_shift_sum[CAPTURE_TOPK]{};
         u64 topk_rank_shift_count[CAPTURE_TOPK]{};
 
@@ -1143,17 +1147,25 @@ struct Searcher {
         return 0;
     }
 
+    [[nodiscard]] static inline int capture_obs_threat_bucket(int bucket) noexcept {
+        return std::clamp(bucket, 0, 3);
+    }
+
     inline void record_main_capture_try(
         int capture_order,
         int see_value,
         int capture_hist,
-        int base_rank
+        int base_rank,
+        int threat_bucket
     ) noexcept {
         ++cap_obs.main_capture_searches;
         const int bucket = see_bucket(see_value);
         ++cap_obs.main_see_tried[bucket];
         if (capture_hist >= CAPTURE_HISTORY_HIGH_THRESHOLD)
             ++cap_obs.main_high_hist_tried;
+        const int threat = capture_obs_threat_bucket(threat_bucket);
+        ++cap_obs.threat_bucket_tried[threat];
+        cap_obs.threat_bucket_history_sum[threat] += capture_hist;
 
         if (capture_order >= 0 && capture_order < CAPTURE_TOPK) {
             ++cap_obs.topk_tried[capture_order];
@@ -1167,37 +1179,45 @@ struct Searcher {
     inline void record_main_capture_cutoff(
         int capture_order,
         int see_value,
-        int capture_hist
+        int capture_hist,
+        int threat_bucket
     ) noexcept {
         ++cap_obs.main_capture_cutoffs;
         const int bucket = see_bucket(see_value);
         ++cap_obs.main_see_cutoff[bucket];
         if (capture_hist >= CAPTURE_HISTORY_HIGH_THRESHOLD)
             ++cap_obs.main_high_hist_cutoff;
+        ++cap_obs.threat_bucket_cutoff[capture_obs_threat_bucket(threat_bucket)];
         if (capture_order >= 0 && capture_order < CAPTURE_TOPK)
             ++cap_obs.topk_cutoff[capture_order];
     }
 
     inline void record_q_capture_try(
         int see_value,
-        int capture_hist
+        int capture_hist,
+        int threat_bucket
     ) noexcept {
         ++cap_obs.q_capture_searches;
         const int bucket = see_bucket(see_value);
         ++cap_obs.q_see_tried[bucket];
         if (capture_hist >= CAPTURE_HISTORY_HIGH_THRESHOLD)
             ++cap_obs.q_high_hist_tried;
+        const int threat = capture_obs_threat_bucket(threat_bucket);
+        ++cap_obs.threat_bucket_tried[threat];
+        cap_obs.threat_bucket_history_sum[threat] += capture_hist;
     }
 
     inline void record_q_capture_cutoff(
         int see_value,
-        int capture_hist
+        int capture_hist,
+        int threat_bucket
     ) noexcept {
         ++cap_obs.q_capture_cutoffs;
         const int bucket = see_bucket(see_value);
         ++cap_obs.q_see_cutoff[bucket];
         if (capture_hist >= CAPTURE_HISTORY_HIGH_THRESHOLD)
             ++cap_obs.q_high_hist_cutoff;
+        ++cap_obs.threat_bucket_cutoff[capture_obs_threat_bucket(threat_bucket)];
     }
 
     inline void record_gate_check(
@@ -1368,6 +1388,26 @@ struct Searcher {
             const u64 cnt = cap_obs.topk_rank_shift_count[i];
             const int avg_x100 = cnt == 0 ? 0 : static_cast<int>((sum * 100) / static_cast<i64>(cnt));
             out << " d" << (i + 1) << "_avg_rank_shift_x100 " << avg_x100;
+        }
+        out << '\n';
+
+        out << "info string capobs threat_bucket";
+        u64 threat_total_tried = 0;
+        for (int bucket = 0; bucket < 4; ++bucket)
+            threat_total_tried += cap_obs.threat_bucket_tried[bucket];
+        for (int bucket = 0; bucket < 4; ++bucket) {
+            const u64 tried = cap_obs.threat_bucket_tried[bucket];
+            const i64 avg_history = tried == 0
+                ? 0
+                : cap_obs.threat_bucket_history_sum[bucket]
+                    / static_cast<i64>(tried);
+            out << " b" << bucket << ' '
+                << cap_obs.threat_bucket_cutoff[bucket] << '/' << tried
+                << " (" << ratio_percent(
+                    cap_obs.threat_bucket_cutoff[bucket], tried
+                ) << "%)"
+                << " avg_hist " << avg_history
+                << " dist " << ratio_percent(tried, threat_total_tried) << '%';
         }
         out << '\n';
     }
@@ -2903,6 +2943,7 @@ struct Searcher {
         Move tt_move,
         int ply,
         int depth,
+        Bitboard capture_threats,
         int* see_out = nullptr
     ) const noexcept {
         // Ordering priority:
@@ -2921,7 +2962,7 @@ struct Searcher {
             const int immediate_see_term = see_immediate_term(see_value, SEE_TERM_PRESET);
             const int see_bias_term = history_tables.see_bias_value_fast(depth, see_value);
             return 20'000'000 + mvv_lva_term
-                + history_tables.capture_value_fast(pos, move)
+                + history_tables.capture_value_fast(pos, move, capture_threats)
                 + immediate_see_term
                 + see_bias_term;
         }
@@ -2943,13 +2984,41 @@ struct Searcher {
         ScoredMoveList& scored,
         Move tt_move,
         int ply,
-        int depth
+        int depth,
+        GenInfo* existing_info = nullptr,
+        Bitboard* capture_threats_out = nullptr
     ) const noexcept {
+        Bitboard capture_threats = 0ULL;
+        if constexpr (SearchComponents::threat_capture_history) {
+            GenInfo local_info{};
+            GenInfo* info = existing_info;
+            for (int i = 0; i < moves.size; ++i) {
+                if (move_is_capture(moves.moves[i])) {
+                    if (info == nullptr) {
+                        init_gen_info(local_info, pos, mem);
+                        info = &local_info;
+                    }
+                    capture_threats = capture_history_threats(*info, pos, mem);
+                    break;
+                }
+            }
+        }
+        if (capture_threats_out != nullptr)
+            *capture_threats_out = capture_threats;
+
         scored.size = moves.size;
         for (int i = 0; i < moves.size; ++i) {
             int see_value = 0;
             scored.moves[i].move = moves.moves[i];
-            scored.moves[i].score = score_move(pos, moves.moves[i], tt_move, ply, depth, &see_value);
+            scored.moves[i].score = score_move(
+                pos,
+                moves.moves[i],
+                tt_move,
+                ply,
+                depth,
+                capture_threats,
+                &see_value
+            );
             scored.moves[i].see_value = see_value;
         }
     }
@@ -2964,14 +3033,16 @@ struct Searcher {
         const Position& pos,
         Move move,
         int depth,
-        int see_value
+        int see_value,
+        Bitboard capture_threats
     ) const noexcept {
         if (move_is_capture(move))
             return history_tables.capture_ordering_score_fast(
                 pos,
                 move,
                 depth,
-                see_value
+                see_value,
+                capture_threats
             ) / 8;
 
         return history_tables.quiet_ordering_score_fast(
@@ -2987,7 +3058,8 @@ struct Searcher {
     [[nodiscard]] inline int root_msv_priority(
         const Position& pos,
         const ScoredMove& scored,
-        int depth
+        int depth,
+        Bitboard capture_threats
     ) const {
         const RootMsvEntry entry = root_msv_snapshot(limits, scored.move);
         const int score_part = scored.score / 1024;
@@ -2995,7 +3067,8 @@ struct Searcher {
             pos,
             scored.move,
             depth,
-            scored.see_value
+            scored.see_value,
+            capture_threats
         );
         const int priority = root_msv_priority_from_entry(
             score_part,
@@ -3010,13 +3083,16 @@ struct Searcher {
     inline void apply_msv_root_order(
         const Position& pos,
         ScoredMoveList& scored,
-        int depth
+        int depth,
+        Bitboard capture_threats
     ) const {
         if (!root_msv_worker_ordering())
             return;
 
         for (int i = 0; i < scored.size; ++i)
-            scored.moves[i].score = root_msv_priority(pos, scored.moves[i], depth);
+            scored.moves[i].score = root_msv_priority(
+                pos, scored.moves[i], depth, capture_threats
+            );
     }
 
     inline void apply_startpos_e4_root_order(
@@ -3069,7 +3145,8 @@ struct Searcher {
         const memory::TTProbe probe = memory::tt_probe(mem.tt, memory::tt_key(root, mem.tables));
         const Move tt_move = tt_move_from_probe(probe);
         ScoredMoveList scored{};
-        score_moves(root, list, scored, tt_move, 0, depth);
+        Bitboard capture_threats = 0ULL;
+        score_moves(root, list, scored, tt_move, 0, depth, nullptr, &capture_threats);
 
         struct DebugEntry {
             Move move = 0;
@@ -3080,7 +3157,9 @@ struct Searcher {
         std::vector<DebugEntry> entries;
         entries.reserve(static_cast<std::size_t>(scored.size));
         for (int i = 0; i < scored.size; ++i) {
-            const int priority = root_msv_priority(root, scored.moves[i], depth);
+            const int priority = root_msv_priority(
+                root, scored.moves[i], depth, capture_threats
+            );
             const RootMsvEntry entry = root_msv_snapshot(limits, scored.moves[i].move);
             if (entry.credit == 0 &&
                 entry.exactHits == 0 &&
@@ -3206,6 +3285,15 @@ struct Searcher {
         }
 
         ScoredMoveList scored{};
+        Bitboard q_capture_threats = 0ULL;
+        if constexpr (SearchComponents::threat_capture_history) {
+            for (int i = 0; i < list.size; ++i) {
+                if (move_is_capture(list.moves[i])) {
+                    q_capture_threats = capture_history_threats(info, pos, mem);
+                    break;
+                }
+            }
+        }
         for (int i = 0; i < list.size; ++i) {
             const Move move = list.moves[i];
             if (!legal_fast(pos, mem, info, move))
@@ -3214,7 +3302,7 @@ struct Searcher {
             int see_value = 0;
             scored.moves[scored.size].move = move;
             scored.moves[scored.size].score =
-                score_move(pos, move, tt_move, ply, 0, &see_value);
+                score_move(pos, move, tt_move, ply, 0, q_capture_threats, &see_value);
             scored.moves[scored.size].see_value = see_value;
             ++scored.size;
         }
@@ -3247,10 +3335,20 @@ struct Searcher {
             const bool capture_move = move_is_capture(move);
             int obs_see_value = 0;
             int obs_capture_hist = 0;
+            int obs_capture_threat_bucket = 0;
             if (capture_move) {
                 obs_see_value = cached_see;
-                obs_capture_hist = history_tables.capture_value_fast(pos, move);
-                record_q_capture_try(obs_see_value, obs_capture_hist);
+                obs_capture_hist = history_tables.capture_value_fast(
+                    pos, move, q_capture_threats
+                );
+                obs_capture_threat_bucket = capture_threat_bucket(
+                    q_capture_threats, move
+                );
+                record_q_capture_try(
+                    obs_see_value,
+                    obs_capture_hist,
+                    obs_capture_threat_bucket
+                );
             }
 #endif
 
@@ -3270,7 +3368,11 @@ struct Searcher {
                 if (alpha >= beta) {
 #if MAGNUS_CAPTURE_OBS
                     if (move_is_capture(move))
-                        record_q_capture_cutoff(obs_see_value, obs_capture_hist);
+                        record_q_capture_cutoff(
+                            obs_see_value,
+                            obs_capture_hist,
+                            obs_capture_threat_bucket
+                        );
 #endif
                     break;
                 }
@@ -3627,7 +3729,15 @@ struct Searcher {
 
             if (probcut_moves.size > 0) {
                 ScoredMoveList scored_probcut{};
-                score_moves(pos, probcut_moves, scored_probcut, tt_move, ply, node_depth);
+                score_moves(
+                    pos,
+                    probcut_moves,
+                    scored_probcut,
+                    tt_move,
+                    ply,
+                    node_depth,
+                    &info
+                );
 
                 for (int i = 0; i < scored_probcut.size; ++i) {
                     const Move move = pick_next(scored_probcut, i);
@@ -3824,7 +3934,7 @@ struct Searcher {
                 ? picker.last_score()
                 : 0;
             const int capture_history_score = simple_capture
-                ? history_tables.capture_value_fast(pos, move)
+                ? history_tables.capture_value_fast(pos, move, info.capture_threats)
                 : 0;
             const bool lmr_quiet_candidate =
                 quiet_move &&
@@ -4006,15 +4116,23 @@ struct Searcher {
             int obs_capture_order = -1;
             int obs_see_value = 0;
             int obs_capture_hist = 0;
+            int obs_capture_threat_bucket = 0;
             if (capture_move) {
                 obs_capture_order = capture_search_order++;
                 obs_see_value = move_see_value;
                 obs_capture_hist = capture_history_score;
+                obs_capture_threat_bucket = capture_threat_bucket(
+                    info.capture_threats, move
+                );
                 const int base_rank = lookup_capture_base_rank(
                     move, capture_moves, capture_base_ranks, capture_count
                 );
                 record_main_capture_try(
-                    obs_capture_order, obs_see_value, obs_capture_hist, base_rank
+                    obs_capture_order,
+                    obs_see_value,
+                    obs_capture_hist,
+                    base_rank,
+                    obs_capture_threat_bucket
                 );
             }
 #endif
@@ -4469,7 +4587,9 @@ struct Searcher {
             if (lmr_reduced_fail_high && score > alpha && score < beta) {
                 const int lmr_bonus_depth = std::max(1, node_depth / 4);
                 if (capture_move)
-                    history_tables.bonus_capture_fast(pos, move, lmr_bonus_depth);
+                    history_tables.bonus_capture_fast(
+                        pos, move, lmr_bonus_depth, info.capture_threats
+                    );
                 else {
                     history_tables.bonus_fast(pos, move, lmr_bonus_depth);
                     history_tables.bonus_pawn_history_fast(pos, move, lmr_bonus_depth);
@@ -4514,7 +4634,10 @@ struct Searcher {
 #if MAGNUS_CAPTURE_OBS
                     if (capture_move)
                         record_main_capture_cutoff(
-                            obs_capture_order, obs_see_value, obs_capture_hist
+                            obs_capture_order,
+                            obs_see_value,
+                            obs_capture_hist,
+                            obs_capture_threat_bucket
                         );
 #endif
                     history_tables.reward_cutoff_fast(
@@ -4526,7 +4649,8 @@ struct Searcher {
                         prev_move,
                         prev2,
                         prev4,
-                        prev8
+                        prev8,
+                        info.capture_threats
                     );
                     // Near-miss bonus: first few quiets that almost cut get a small reward.
                     if (!move_is_capture(move) && searched_quiet_count > 1) {
@@ -4544,7 +4668,8 @@ struct Searcher {
                             searched_captures,
                             searched_capture_count,
                             move,
-                            fail_low_malus_depth
+                            fail_low_malus_depth,
+                            info.capture_threats
                         );
                     else {
                         history_tables.penalize_quiets_fast(
@@ -4619,8 +4744,17 @@ struct Searcher {
             best_move != 0) {
             const int hist_depth = std::max(1, node_depth - 1);
             if (move_is_capture(best_move)) {
-                history_tables.bonus_capture_fast(pos, best_move, hist_depth);
-                history_tables.penalize_captures_fast(pos, searched_captures, searched_capture_count, best_move, hist_depth);
+                history_tables.bonus_capture_fast(
+                    pos, best_move, hist_depth, info.capture_threats
+                );
+                history_tables.penalize_captures_fast(
+                    pos,
+                    searched_captures,
+                    searched_capture_count,
+                    best_move,
+                    hist_depth,
+                    info.capture_threats
+                );
             } else {
                 history_tables.bonus_fast(pos, best_move, hist_depth);
                 history_tables.bonus_pawn_history_fast(pos, best_move, hist_depth);
@@ -4851,8 +4985,11 @@ struct Searcher {
         const int alpha0 = alpha;
 
         ScoredMoveList scored;
-        score_moves(root, list, scored, root_hint, 0, depth);
-        apply_msv_root_order(root, scored, depth);
+        Bitboard root_capture_threats = 0ULL;
+        score_moves(
+            root, list, scored, root_hint, 0, depth, nullptr, &root_capture_threats
+        );
+        apply_msv_root_order(root, scored, depth, root_capture_threats);
         apply_startpos_e4_root_order(root, scored);
         int best_score = -VALUE_INF;
         int best_selection_score = -VALUE_INF;
@@ -4987,8 +5124,11 @@ struct Searcher {
             list.moves[list.size++] = root_lines[static_cast<std::size_t>(i)].move;
 
         ScoredMoveList scored;
-        score_moves(root, list, scored, root_hint, 0, depth);
-        apply_msv_root_order(root, scored, depth);
+        Bitboard root_capture_threats = 0ULL;
+        score_moves(
+            root, list, scored, root_hint, 0, depth, nullptr, &root_capture_threats
+        );
+        apply_msv_root_order(root, scored, depth, root_capture_threats);
         apply_startpos_e4_root_order(root, scored);
         int best_score = -VALUE_INF;
         int best_selection_score = -VALUE_INF;
@@ -6024,8 +6164,11 @@ void build_root_lines(
         memory::tt_probe(searcher.mem.tt, memory::tt_key(root, searcher.mem.tables));
     const Move tt_move = searcher.tt_move_from_probe(probe);
     ScoredMoveList scored{};
-    searcher.score_moves(root, list, scored, tt_move, 0, depth);
-    searcher.apply_msv_root_order(root, scored, depth);
+    Bitboard root_capture_threats = 0ULL;
+    searcher.score_moves(
+        root, list, scored, tt_move, 0, depth, nullptr, &root_capture_threats
+    );
+    searcher.apply_msv_root_order(root, scored, depth, root_capture_threats);
     searcher.apply_startpos_e4_root_order(root, scored);
 
     lines.clear();

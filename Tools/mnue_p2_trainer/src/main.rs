@@ -49,7 +49,7 @@ use bullet_lib::{
     value::{ValueTrainerBuilder, loader},
 };
 use bulletformat::ChessBoard;
-use mnue_binpack_loader::ResamplingSfBinpackLoader;
+use mnue_binpack_loader::{ResamplingSfBinpackLoader, StartPositionDataLoader};
 use mnue_data_schedule::{
     DEFAULT_CHUNK_SHUFFLE_SEED, DEFAULT_CHUNK_VIRTUAL_EPOCHS, DataSchedule, DataScheduleOptions,
     InputDataKind, build_data_schedule, input_data_kind_name, print_startup_log,
@@ -205,6 +205,8 @@ struct Config {
     lr_final: f32,
     l0_init_scale: f32,
     save_rate: usize,
+    resume_from: Option<String>,
+    start_superbatch: usize,
     output_dir: String,
     net_dir: String,
 }
@@ -227,6 +229,8 @@ impl Config {
         let mut lr_final = DEFAULT_LR_FINAL;
         let mut l0_init_scale = DEFAULT_L0_INIT_SCALE;
         let mut save_rate = DEFAULT_SAVE_RATE;
+        let mut resume_from = None;
+        let mut start_superbatch = 1;
         let mut output_dir = None;
         let mut net_dir = DEFAULT_NET_DIR.to_string();
 
@@ -279,6 +283,8 @@ impl Config {
                 "lr-final" => lr_final = parse_f32(key, &value),
                 "l0-init-scale" => l0_init_scale = parse_f32(key, &value),
                 "save-rate" | "save-sb" => save_rate = parse_usize(key, &value),
+                "resume-from" => resume_from = Some(parse_path_arg(key, &value)),
+                "start-superbatch" => start_superbatch = parse_usize(key, &value),
                 "output-dir" => output_dir = Some(value),
                 "net-dir" => net_dir = value,
                 _ => die(format!("unknown option --{key}")),
@@ -292,9 +298,19 @@ impl Config {
         require_nonzero_usize("threads", threads);
         require_nonzero_usize("superbatches", superbatches);
         require_nonzero_usize("save-sb", save_rate);
+        require_nonzero_usize("start-superbatch", start_superbatch);
         require_positive_f32("lr", lr);
         require_positive_f32("lr-final", lr_final);
         require_positive_f32("l0-init-scale", l0_init_scale);
+
+        if start_superbatch > superbatches {
+            die("--start-superbatch must not exceed --superbatches");
+        }
+        match (&resume_from, start_superbatch) {
+            (Some(_), 1) => die("--resume-from requires --start-superbatch 2 or greater"),
+            (None, 2..) => die("--start-superbatch 2 or greater requires --resume-from"),
+            _ => {}
+        }
 
         let name = name.unwrap_or_else(|| arch.default_name().to_string());
         let output_dir = output_dir.unwrap_or_else(|| format!("{DEFAULT_RUNS_DIR}/{name}"));
@@ -316,6 +332,8 @@ impl Config {
             lr_final,
             l0_init_scale,
             save_rate,
+            resume_from,
+            start_superbatch,
             output_dir,
             net_dir,
         }
@@ -333,6 +351,18 @@ impl Config {
 
     fn effective_positions(&self) -> u128 {
         self.batch_size as u128 * self.batches_per_superbatch() as u128 * self.superbatches as u128
+    }
+
+    fn completed_positions(&self) -> u128 {
+        self.batch_size as u128
+            * self.batches_per_superbatch() as u128
+            * self.start_superbatch.saturating_sub(1) as u128
+    }
+
+    fn remaining_positions(&self) -> u128 {
+        self.batch_size as u128
+            * self.batches_per_superbatch() as u128
+            * (self.superbatches - self.start_superbatch + 1) as u128
     }
 
     fn data_schedule_options(&self) -> DataScheduleOptions {
@@ -364,7 +394,14 @@ impl Config {
         println!("Effective positions    : {}", self.effective_positions());
         println!("Batch size             : {}", self.batch_size);
         println!("Superbatches           : {}", self.superbatches);
+        println!("Start superbatch       : {}", self.start_superbatch);
         println!("Batches/superbatch     : {}", self.batches_per_superbatch());
+        println!("Completed positions    : {}", self.completed_positions());
+        println!("Remaining positions    : {}", self.remaining_positions());
+        println!(
+            "Resume checkpoint      : {}",
+            self.resume_from.as_deref().unwrap_or("none")
+        );
         println!("Threads                : {}", self.threads);
         println!("LR                     : {}", self.lr);
         println!("LR final               : {}", self.lr_final);
@@ -395,6 +432,8 @@ fn print_usage() {
            --l0-init-scale X           Multiplier for l0 weight init stdev. Default: {DEFAULT_L0_INIT_SCALE}\n\
            --save-sb N                 Save one checkpoint every N superbatches. Default: {DEFAULT_SAVE_RATE}\n\
            --save-rate N               Alias for --save-sb.\n\
+           --resume-from PATH          Load optimiser state from a saved checkpoint directory.\n\
+           --start-superbatch N        First superbatch to train; requires --resume-from when N > 1.\n\
            --output-dir PATH           Default: {DEFAULT_RUNS_DIR}/NAME\n\
            --net-dir PATH              Default: {DEFAULT_NET_DIR}"
     );
@@ -425,6 +464,65 @@ fn parse_path_arg(key: &str, value: &str) -> String {
         die(format!("--{key} must not be empty"));
     }
     value.to_string()
+}
+
+fn checkpoint_superbatch(path: &Path) -> Option<usize> {
+    path.file_name()?.to_str()?.rsplit_once('-')?.1.parse().ok()
+}
+
+fn validate_resume_checkpoint(path: &Path, start_superbatch: usize) {
+    if !path.is_dir() {
+        die(format!(
+            "--resume-from is not a checkpoint directory: {}",
+            path.display()
+        ));
+    }
+
+    if let Some(checkpoint_superbatch) = checkpoint_superbatch(path) {
+        let expected = start_superbatch - 1;
+        if checkpoint_superbatch != expected {
+            die(format!(
+                "resume checkpoint superbatch is {checkpoint_superbatch}, but --start-superbatch {start_superbatch} expects checkpoint {expected}"
+            ));
+        }
+    }
+
+    for relative in [
+        "optimiser_state/weights.bin",
+        "optimiser_state/momentum.bin",
+        "optimiser_state/velocity.bin",
+    ] {
+        let file = path.join(relative);
+        let Ok(metadata) = fs::metadata(&file) else {
+            die(format!(
+                "resume checkpoint is missing required file: {}",
+                file.display()
+            ));
+        };
+        if !metadata.is_file() || metadata.len() == 0 {
+            die(format!(
+                "resume checkpoint file is empty or invalid: {}",
+                file.display()
+            ));
+        }
+    }
+}
+
+fn validate_resume_output_targets(config: &Config) {
+    if config.resume_from.is_none() {
+        return;
+    }
+
+    for superbatch in config.start_superbatch..=config.superbatches {
+        let target =
+            PathBuf::from(&config.output_dir).join(format!("{}-{superbatch}", config.name));
+        if target.exists() {
+            die(format!(
+                "refusing to overwrite resume output target: {}",
+                target.display()
+            ));
+        }
+    }
 }
 
 fn accept_all_binpack(_: &loader::sfbinpack::TrainingDataEntry) -> bool {
@@ -652,6 +750,10 @@ fn run_training<S: P2Spec>(config: Config) {
 
     let data_schedule = build_data_schedule(config.data_schedule_options())
         .unwrap_or_else(|error| die(error.to_string()));
+    if let Some(path) = &config.resume_from {
+        validate_resume_checkpoint(Path::new(path), config.start_superbatch);
+    }
+    validate_resume_output_targets(&config);
     config.print_summary::<S>(&data_schedule);
     print_startup_log(&data_schedule);
 
@@ -686,13 +788,19 @@ fn run_training<S: P2Spec>(config: Config) {
             l1.forward(hidden).select(output_buckets)
         });
 
+    if let Some(path) = &config.resume_from {
+        println!("Loading optimiser state from {path}");
+        trainer.load_from_checkpoint(path);
+        println!("Loaded optimiser state successfully.");
+    }
+
     let schedule = TrainingSchedule {
         net_id: config.name.clone(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: config.batch_size,
             batches_per_superbatch,
-            start_superbatch: 1,
+            start_superbatch: config.start_superbatch,
             end_superbatch: config.superbatches,
         },
         wdl_scheduler: wdl::ConstantWDL { value: 0.75 },
@@ -720,7 +828,7 @@ fn run_training<S: P2Spec>(config: Config) {
         }
         InputDataKind::SfBinpack => {
             if data_schedule.resample_on_exhaustion {
-                let data_loader = ResamplingSfBinpackLoader::new(
+                let data_loader = StartPositionDataLoader::new(ResamplingSfBinpackLoader::new(
                     data_schedule.chunk_path_strings(),
                     BINPACK_BUFFER_MB,
                     config.threads,
@@ -728,15 +836,16 @@ fn run_training<S: P2Spec>(config: Config) {
                     data_schedule.seed,
                     data_schedule.virtual_epochs,
                     data_schedule.chunk_sample,
-                );
+                ));
                 trainer.run(&schedule, &settings, &data_loader);
             } else {
-                let data_loader = loader::SfBinpackLoader::new_concat_multiple(
-                    &path_refs,
-                    BINPACK_BUFFER_MB,
-                    config.threads,
-                    accept_all_binpack,
-                );
+                let data_loader =
+                    StartPositionDataLoader::new(loader::SfBinpackLoader::new_concat_multiple(
+                        &path_refs,
+                        BINPACK_BUFFER_MB,
+                        config.threads,
+                        accept_all_binpack,
+                    ));
                 trainer.run(&schedule, &settings, &data_loader);
             }
         }

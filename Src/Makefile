@@ -4,6 +4,7 @@ TARGET := MagXTK-14SM1
 
 BUILD_PROFILE ?= auto
 PGO ?= 0
+EXTRA_CPPFLAGS ?=
 BUILD_DIR := build
 TARGET_TRIPLE := $(shell $(CXX) -dumpmachine)
 X86_64_TARGET := $(filter x86_64% amd64%,$(TARGET_TRIPLE))
@@ -166,7 +167,7 @@ WARN_FLAGS := \
 	-Wno-unused-parameter \
 	-Wno-sign-conversion
 
-CPPFLAGS := -MMD -MP -iquote . -I$(FATHOM_DIR) $(PROFILE_CPPFLAGS) \
+CPPFLAGS := -MMD -MP -iquote . -I$(FATHOM_DIR) $(PROFILE_CPPFLAGS) $(EXTRA_CPPFLAGS) \
 	-DMNUE_EMBEDDED_FILENAME='"$(MNUE_EMBEDDED_FILE)"'
 
 BASE_CXXFLAGS := \

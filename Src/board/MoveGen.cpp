@@ -82,42 +82,36 @@ Bitboard query_attacks_by_color_on_occupancy(
     Color by,
     Bitboard occupied
 ) noexcept {
-    Bitboard attacks = 0ULL;
-    Bitboard pawns = query_pieces_bb(pos, by, PAWN);
-    Bitboard knights = query_pieces_bb(pos, by, KNIGHT);
-    Bitboard bishops = query_pieces_bb(pos, by, BISHOP);
-    Bitboard rooks = query_pieces_bb(pos, by, ROOK);
-    Bitboard queens = query_pieces_bb(pos, by, QUEEN);
-    Bitboard kings = query_pieces_bb(pos, by, KING);
+    constexpr Bitboard FILE_A = 0x0101010101010101ULL;
+    constexpr Bitboard FILE_H = 0x8080808080808080ULL;
 
-    while (pawns) {
-        const Square sq = query_lsb_sq(pawns);
-        pawns &= pawns - 1;
-        attacks |= pawn_attacks(mem, by, sq);
-    }
+    Bitboard attacks = 0ULL;
+    const Bitboard pawns = query_pieces_bb(pos, by, PAWN);
+    Bitboard knights = query_pieces_bb(pos, by, KNIGHT);
+    const Bitboard queens = query_pieces_bb(pos, by, QUEEN);
+    const Bitboard diagonal_sliders =
+        query_pieces_bb(pos, by, BISHOP) | queens;
+    const Bitboard orthogonal_sliders =
+        query_pieces_bb(pos, by, ROOK) | queens;
+    const Bitboard kings = query_pieces_bb(pos, by, KING);
+
+    if (by == WHITE)
+        attacks |= ((pawns & ~FILE_A) << 7) | ((pawns & ~FILE_H) << 9);
+    else
+        attacks |= ((pawns & ~FILE_A) >> 9) | ((pawns & ~FILE_H) >> 7);
     while (knights) {
         const Square sq = query_lsb_sq(knights);
         knights &= knights - 1;
         attacks |= knight_attacks(mem, sq);
     }
-    while (bishops) {
-        const Square sq = query_lsb_sq(bishops);
-        bishops &= bishops - 1;
-        attacks |= bishop_attacks_fast(mem, sq, occupied);
-    }
-    while (rooks) {
-        const Square sq = query_lsb_sq(rooks);
-        rooks &= rooks - 1;
-        attacks |= rook_attacks_fast(mem, sq, occupied);
-    }
-    while (queens) {
-        const Square sq = query_lsb_sq(queens);
-        queens &= queens - 1;
-        attacks |= queen_attacks_fast(mem, sq, occupied);
-    }
-    while (kings) {
+    attacks |= slider_attacks_union_fast(
+        mem,
+        diagonal_sliders,
+        orthogonal_sliders,
+        occupied
+    );
+    if (kings) {
         const Square sq = query_lsb_sq(kings);
-        kings &= kings - 1;
         attacks |= king_attacks(mem, sq);
     }
 
@@ -239,6 +233,23 @@ Bitboard danger_bb(
     return query_attacks_by_color_on_occupancy(pos, mem, by, occupied);
 }
 
+Bitboard capture_history_threats(
+    GenInfo& info,
+    const Position& pos,
+    const memory::Memory& mem
+) noexcept {
+    if (!info.capture_threats_valid) {
+        info.capture_threats = query_attacks_by_color_on_occupancy(
+            pos,
+            mem,
+            info.them,
+            pos.occupied
+        );
+        info.capture_threats_valid = true;
+    }
+    return info.capture_threats;
+}
+
 void init_gen_info(
     GenInfo& info,
     const Position& pos,
@@ -259,7 +270,8 @@ void init_gen_info(
         info.pinners,
         info.pinned
     );
-    info.danger = 0ULL;
+    info.capture_threats = 0ULL;
+    info.capture_threats_valid = false;
     info.in_check = info.checkers != 0ULL;
     info.double_check = query_more_than_one(info.checkers);
 

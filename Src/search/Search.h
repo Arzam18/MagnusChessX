@@ -278,6 +278,9 @@ inline constexpr TtTrustStage ACTIVE_TT_TRUST_STAGE = TtTrustStage::C;
 #ifndef MAGNUS_SEARCH_ENABLE_CORRECTION_HISTORY
 #define MAGNUS_SEARCH_ENABLE_CORRECTION_HISTORY 1
 #endif
+#ifndef MAGNUS_SEARCH_ENABLE_THREAT_CAPTURE_HISTORY
+#define MAGNUS_SEARCH_ENABLE_THREAT_CAPTURE_HISTORY 1
+#endif
 
 struct SearchComponents {
     static constexpr bool aspiration = MAGNUS_SEARCH_ENABLE_ASPIRATION != 0;
@@ -349,6 +352,8 @@ struct SearchComponents {
     static constexpr bool singular_extension = MAGNUS_SEARCH_ENABLE_SINGULAR != 0;
     static constexpr bool lmr = MAGNUS_SEARCH_ENABLE_LMR != 0;
     static constexpr bool correction_history = MAGNUS_SEARCH_ENABLE_CORRECTION_HISTORY != 0;
+    static constexpr bool threat_capture_history =
+        MAGNUS_SEARCH_ENABLE_THREAT_CAPTURE_HISTORY != 0;
 };
 
 /*

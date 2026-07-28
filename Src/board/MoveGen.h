@@ -210,7 +210,10 @@ struct GenInfo {
     Bitboard checkers = 0ULL;
     Bitboard pinners = 0ULL;
     Bitboard pinned = 0ULL;
-    Bitboard danger = 0ULL;
+    // Lazily populated attack map used by threat-indexed capture history.
+    // It always describes the pre-move position and uses the full occupancy.
+    Bitboard capture_threats = 0ULL;
+    bool capture_threats_valid = false;
 
     Bitboard capture_mask = 0ULL;
     Bitboard push_mask = 0ULL;
@@ -268,6 +271,12 @@ Bitboard danger_bb(
 ) noexcept;
 
 void init_gen_info(
+    GenInfo& info,
+    const Position& pos,
+    const memory::Memory& mem
+) noexcept;
+
+Bitboard capture_history_threats(
     GenInfo& info,
     const Position& pos,
     const memory::Memory& mem
