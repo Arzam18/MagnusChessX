@@ -22,7 +22,8 @@ Pass it to Cargo with `--config <local-bullet-config.toml>`.
 
 ## Supported Layouts
 
-Select the layout with `--arch p2` or `--arch p2-k32`. The default is `p2`.
+Select the layout with `--arch p2`, `--arch p2-k32`, or `--arch p2-h32`.
+The default is `p2`.
 
 ### P2
 
@@ -81,6 +82,25 @@ Output buckets are:
 phase_bucket2 x stm_king_zone32 = 64
 ```
 
+### P2-H32
+
+P2-H32 is a separate, incompatible hybrid architecture. For each perspective,
+the board is first oriented vertically; when the relative own king is on files
+e-h, the king and every feature square are then mirrored horizontally.
+
+```text
+coarse branch = 16 x 10 x 64 = 10240 inputs -> 768 hidden
+fine branch   = 32 x 11 x 64 = 22528 inputs -> 256 hidden
+representation = (768 + 256) x 2 perspectives = 2048
+output buckets = material_phase4 x coarse_stm_king16 = 64
+```
+
+The coarse branch contains friendly/enemy P/N/B/R/Q planes. The fine branch
+adds one enemy-king plane; the own king is represented by the exact K32 bucket.
+The material phases use N/B=1, R=2, Q=4 and ranges 18-24, 12-17, 6-11, and
+0-5. The raw quantised payload is exactly 27,527,296 bytes; headered networks
+use architecture id 9 and are 27,527,336 bytes.
+
 The exported `.mnue` file has the standard 40-byte Magnus MNUE header followed
 by the Bullet `quantised.bin` payload.
 
@@ -96,6 +116,18 @@ Example P2-K32 100M / 5-superbatch smoke run:
 
 ```powershell
 cargo run --manifest-path Tools/mnue_p2_trainer/Cargo.toml --release --features cuda -- --arch p2-k32 --name mnue_p2k32_100m_5sb --data <train.data> --positions 100000000 --batch-size 65536 --threads 12 --superbatches 5 --lr 0.001 --lr-final 0.0001 --l0-init-scale 0.25 --save-sb 1
+```
+
+Example P2-H32 run on direct shuffled BulletFormat data:
+
+```powershell
+cargo run --manifest-path Tools/mnue_p2_trainer/Cargo.toml --release --features cuda -- `
+  --arch p2-h32 --name mnue_p2h32_10b_200sb `
+  --data D:\NNUE\train_3b_shuffled.data --shuffle-mode sequential `
+  --positions 10000000000 --batch-size 131072 --threads 12 `
+  --superbatches 200 --save-sb 4 `
+  --lr 0.001 --lr-final 0.0000625 `
+  --l0-init-scale 0.25 --fine-init-scale 0.125
 ```
 
 Fresh normal-P2 `.binpack` runs default to full-dataset shuffle. For the
@@ -121,7 +153,7 @@ fingerprints still match.
 Important parameters:
 
 ```text
---arch p2|p2-k32  trainer architecture, default p2
+--arch p2|p2-k32|p2-h32 trainer architecture, default p2
 --name NAME          net id, output directory name, checkpoint prefix
 --data PATH          training .data or .binpack file; repeatable
 --data-dir DIR       directory of .binpack chunks; repeatable
@@ -137,6 +169,7 @@ Important parameters:
 --lr X               initial learning rate
 --lr-final X         final exponential-decay learning rate
 --l0-init-scale X    multiplier for l0 weight init stdev
+--fine-init-scale X  H32 fine-branch init multiplier, default 0.125
 --save-sb N          save one checkpoint every N superbatches
 --save-rate N        alias for --save-sb
 --resume-from PATH   checkpoint directory whose optimiser state should be loaded
@@ -160,8 +193,8 @@ is intentionally rejected in this mode.
 `interleaved` retains the previous 16,384-position stripe loader and 256 MiB
 shuffle buffer. The old `--chunk-resample-on-exhaustion` flag still selects
 this mode but prints a deprecation warning. `sequential` retains the native
-legacy Bullet loader. P2-K32 defaults remain unchanged; dataset mode currently
-supports normal P2 only.
+legacy Bullet loader. P2-K32 defaults remain unchanged; dataset mode supports
+normal P2 and P2-H32.
 
 Fresh runs write `run_manifest.toml` in the checkpoint root. It pins shuffle
 mode, source/cache fingerprints, seed, architecture, learning-rate schedule,

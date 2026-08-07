@@ -278,6 +278,65 @@ void test_dynamic_rights_clearing(const memory::Memory& mem) {
     expect(positions_equal(capture, capture_before), "captured dynamic rook right undo");
 }
 
+void test_p2_incremental_move_classes(const memory::Memory& mem) {
+    struct Fixture {
+        const char* fen;
+        const char* move;
+    };
+    constexpr std::array<Fixture, 6> fixtures{{
+        {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "e2e4"},
+        {"r3k3/8/8/8/8/8/8/R3K3 w - - 0 1", "a1a8"},
+        {"4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8q"},
+        {"4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6"},
+        {"r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1g1"},
+        {"7k/8/8/8/8/8/8/3K4 w - - 0 1", "d1e1"}
+    }};
+
+    for (const Fixture& fixture : fixtures) {
+        Position pos = parsed(mem, fixture.fen, false);
+        Move move = 0;
+        expect(find_uci_move(pos, mem, fixture.move, move), "P2 move fixture generated");
+        mnue::P2AccumulatorStack stack{};
+        stack.reset();
+        (void)mnue::eval_p2(pos, stack);
+        stack.push(pos, move);
+        StateInfo state{};
+        make_move(pos, move, mem.tables, state);
+        const int incremental = mnue::eval_p2(pos, stack);
+        const int reference = mnue::debug_eval_p2_reference(pos);
+        expect(incremental == reference, "P2 SIMD/reference parity");
+        std::ostringstream diagnostic;
+        expect(
+            mnue::debug_check_p2_incremental(pos, stack, diagnostic),
+            "P2 move-class incremental rebuild"
+        );
+        stack.pop();
+    }
+}
+
+void test_h32_horizontal_symmetry(const memory::Memory& mem) {
+    if (std::string_view(mnue::p2_short_name()) != "p2-h32")
+        return;
+    expect(
+        std::string_view(mnue::p2_arch_name()) == "P2-H32",
+        "H32 architecture status"
+    );
+    expect(mnue::p2_input_size() == 32768, "H32 input size status");
+    expect(mnue::p2_hidden_size() == 1024, "H32 hidden size status");
+    expect(mnue::p2_input_buckets() == 32, "H32 input bucket status");
+    expect(mnue::p2_output_buckets() == 64, "H32 output bucket status");
+    expect(mnue::p2_file_bytes() == 27527336, "H32 file size status");
+    Position left = parsed(mem, "4k3/8/8/2q5/5N2/8/1P6/2K5 w - - 0 1", false);
+    Position right = parsed(mem, "3k4/8/8/5q2/2N5/8/6P1/5K2 w - - 0 1", false);
+    expect(mnue::eval_p2(left) == mnue::eval_p2(right), "H32 horizontal symmetry");
+    std::ostringstream dump;
+    mnue::debug_dump_p2_features(left, dump);
+    expect(
+        dump.str().find("mnue debug p2-h32") != std::string::npos,
+        "H32 feature dump"
+    );
+}
+
 void test_stockfish_reference_perft(const memory::Memory& mem) {
     Position start{};
     set_start_position(start);
@@ -322,12 +381,17 @@ int main() {
     memory::memory_init(mem, 1, 1, 1);
     attack_init_backend(mem);
 
+    if (const char* network = std::getenv("MAGNUS_TEST_P2_NETWORK"))
+        expect(mnue::load_p2(network), "load test P2 network");
+
     test_fen_castling_metadata(mem);
     test_uci_notation(mem);
     test_castling_make_unmake(mem);
     test_castling_legality(mem);
     test_castling_gives_check(mem);
     test_dynamic_rights_clearing(mem);
+    test_p2_incremental_move_classes(mem);
+    test_h32_horizontal_symmetry(mem);
     test_stockfish_reference_perft(mem);
 
     memory::memory_free(mem);

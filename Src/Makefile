@@ -35,7 +35,7 @@ endif
 
 # Embedded P2-family network - single source of truth for the filename.
 # Changing this updates MnueEmbedded.S, Mnue.cpp, and Uci.cpp automatically.
-MNUE_EMBEDDED_FILE := mm-4ac81907e.MNUE
+MNUE_EMBEDDED_FILE := magxtk-master-p2h32-s8011M-o3183M-c+frc.mnue
 
 # Fresh-clone helper: keep the large MNUE out of git.
 # Linux server uses the local file first; other workers fall back to GitHub raw.
@@ -226,13 +226,24 @@ LDLIBS :=
 ifeq ($(OS),Windows_NT)
 	EXEEXT := .exe
 
-	fixpath = $(subst /,\,$(1))
+	# MSYS2 shells (including UCRT64) report Windows_NT but execute recipes
+	# with /bin/sh, so cmd.exe commands such as "if exist" are invalid there.
+	ifneq ($(strip $(MSYSTEM)),)
+		RECIPE_SHELL := posix
+		MKDIR_P = mkdir -p "$(1)"
+		RM_F    = rm -f "$(1)"
+		RMDIR_R = rm -rf "$(1)"
+	else
+		RECIPE_SHELL := cmd
+		fixpath = $(subst /,\,$(1))
 
-	MKDIR_P = if not exist "$(call fixpath,$(1))" mkdir "$(call fixpath,$(1))"
-	RM_F    = if exist "$(call fixpath,$(1))" del /q "$(call fixpath,$(1))"
-	RMDIR_R = if exist "$(call fixpath,$(1))" rmdir /s /q "$(call fixpath,$(1))"
+		MKDIR_P = if not exist "$(call fixpath,$(1))" mkdir "$(call fixpath,$(1))"
+		RM_F    = if exist "$(call fixpath,$(1))" del /q "$(call fixpath,$(1))"
+		RMDIR_R = if exist "$(call fixpath,$(1))" rmdir /s /q "$(call fixpath,$(1))"
+	endif
 else
 	EXEEXT :=
+	RECIPE_SHELL := posix
 	MKDIR_P = mkdir -p "$(1)"
 	RM_F    = rm -f "$(1)"
 	RMDIR_R = rm -rf "$(1)"
@@ -270,7 +281,7 @@ else
 	FINAL_OUTPUT := $(OUTPUT)
 endif
 
-ifeq ($(OS),Windows_NT)
+ifeq ($(RECIPE_SHELL),cmd)
 	RUN_CMD = .\$(call fixpath,$(FINAL_OUTPUT))
 	RUN_PROFGEN_CMD = .\$(call fixpath,$(PROFGEN_OUTPUT))
 	RUN_PGO_CMD = .\$(call fixpath,$(PGO_OUTPUT))
@@ -341,7 +352,7 @@ $(FATHOM_OBJ): \
 	$(CC) $(FATHOM_CFLAGS) -c $(FATHOM_DIR)/tbprobe.c -o $@
 
 # Generate/copy/download embedded MNUE for clean clones.
-ifeq ($(OS),Windows_NT)
+ifeq ($(RECIPE_SHELL),cmd)
 build/$(MNUE_EMBEDDED_FILE):
 	$(call MKDIR_P,$(BUILD_DIR))
 	@echo Downloading embedded MNUE: $(MNUE_EMBEDDED_URL)

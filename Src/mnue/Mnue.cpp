@@ -134,6 +134,39 @@ struct Network {
     }
 };
 
+struct H32Network {
+    bool loaded = false;
+    int scale = kScale;
+    std::string path;
+    std::string error;
+    std::vector<i16> coarse_w;
+    std::vector<i16> coarse_b;
+    std::vector<i16> fine_w;
+    std::vector<i16> fine_b;
+    std::vector<i16> w1;
+    std::vector<std::int8_t> w1_i8;
+    std::vector<i16> b1;
+    int w1_max_abs = 0;
+    bool forward_vnni_safe = false;
+    bool forward_madd_safe = false;
+    bool forward_i32_safe = false;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return coarse_w.size()
+                == static_cast<std::size_t>(P2H32Layout::CoarseInputSize)
+                    * P2H32Layout::CoarseHiddenSize
+            && fine_w.size()
+                == static_cast<std::size_t>(P2H32Layout::FineInputSize)
+                    * P2H32Layout::FineHiddenSize
+            && coarse_b.size() == P2H32Layout::CoarseHiddenSize
+            && fine_b.size() == P2H32Layout::FineHiddenSize
+            && w1.size()
+                == static_cast<std::size_t>(P2H32Layout::OutputBuckets)
+                    * 2 * P2H32Layout::HiddenSize
+            && b1.size() == P2H32Layout::OutputBuckets;
+    }
+};
+
 struct FileHeader {
     u32 magic;
     u32 version;
@@ -151,6 +184,7 @@ static_assert(sizeof(FileHeader) == 40);
 
 Network<P2Layout> g_p2;
 Network<P2K32Layout> g_p2k32;
+H32Network g_p2h32;
 Network<P2ProLayout> g_p2pro;
 Network<P4Layout> g_p4;
 std::string g_error;
@@ -160,6 +194,7 @@ enum class P2ActiveKind : std::uint8_t {
     None,
     P2,
     P2K32,
+    P2H32,
     P2Pro
 };
 
@@ -170,6 +205,7 @@ const std::string kEmptyPath;
     switch (kind) {
         case P2ActiveKind::P2:    return "mnue-p2";
         case P2ActiveKind::P2K32: return "mnue-p2-k32";
+        case P2ActiveKind::P2H32: return "mnue-p2-h32";
         case P2ActiveKind::P2Pro: return "mnue-p2pro";
         case P2ActiveKind::None:  return "mnue-p2";
     }
@@ -180,6 +216,7 @@ const std::string kEmptyPath;
     switch (kind) {
         case P2ActiveKind::P2:    return "P2";
         case P2ActiveKind::P2K32: return "P2-K32";
+        case P2ActiveKind::P2H32: return "P2-H32";
         case P2ActiveKind::P2Pro: return "P2Pro";
         case P2ActiveKind::None:  return "P2";
     }
@@ -190,6 +227,7 @@ const std::string kEmptyPath;
     switch (kind) {
         case P2ActiveKind::P2:    return "p2";
         case P2ActiveKind::P2K32: return "p2-k32";
+        case P2ActiveKind::P2H32: return "p2-h32";
         case P2ActiveKind::P2Pro: return "p2pro";
         case P2ActiveKind::None:  return "p2";
     }
@@ -219,6 +257,14 @@ template<class Layout>
     return sizeof(FileHeader) + payload_bytes<Layout>();
 }
 
+[[nodiscard]] constexpr std::uintmax_t h32_payload_bytes() noexcept {
+    return static_cast<std::uintmax_t>(27'527'296);
+}
+
+[[nodiscard]] constexpr std::uintmax_t h32_file_bytes() noexcept {
+    return sizeof(FileHeader) + h32_payload_bytes();
+}
+
 template<class Layout>
 void clear_network(Network<Layout>& net) noexcept {
     net.loaded = false;
@@ -236,12 +282,48 @@ void clear_network(Network<Layout>& net) noexcept {
     net.forward_i32_safe = false;
 }
 
+void clear_network(H32Network& net) noexcept {
+    net.loaded = false;
+    net.scale = kScale;
+    net.path.clear();
+    net.error.clear();
+    net.coarse_w.clear();
+    net.coarse_b.clear();
+    net.fine_w.clear();
+    net.fine_b.clear();
+    net.w1.clear();
+    net.w1_i8.clear();
+    net.b1.clear();
+    net.w1_max_abs = 0;
+    net.forward_vnni_safe = false;
+    net.forward_madd_safe = false;
+    net.forward_i32_safe = false;
+}
+
 template<class Layout>
 void resize_network(Network<Layout>& net) {
     net.w0.resize(static_cast<std::size_t>(Layout::InputSize) * Layout::HiddenSize);
     net.b0.resize(static_cast<std::size_t>(Layout::HiddenSize));
     net.w1.resize(static_cast<std::size_t>(Layout::OutputBuckets) * 2 * Layout::HiddenSize);
     net.b1.resize(static_cast<std::size_t>(Layout::OutputBuckets));
+}
+
+void resize_network(H32Network& net) {
+    net.coarse_w.resize(
+        static_cast<std::size_t>(P2H32Layout::CoarseInputSize)
+        * P2H32Layout::CoarseHiddenSize
+    );
+    net.coarse_b.resize(P2H32Layout::CoarseHiddenSize);
+    net.fine_w.resize(
+        static_cast<std::size_t>(P2H32Layout::FineInputSize)
+        * P2H32Layout::FineHiddenSize
+    );
+    net.fine_b.resize(P2H32Layout::FineHiddenSize);
+    net.w1.resize(
+        static_cast<std::size_t>(P2H32Layout::OutputBuckets)
+        * 2 * P2H32Layout::HiddenSize
+    );
+    net.b1.resize(P2H32Layout::OutputBuckets);
 }
 
 template<class Layout>
@@ -254,8 +336,8 @@ template<class Layout>
     );
 }
 
-template<class Layout>
-void refresh_network_traits(Network<Layout>& net) noexcept {
+template<class Layout, class Net>
+void refresh_network_traits(Net& net) noexcept {
     int max_abs = 0;
     bool w1_i8_safe = true;
     for (const i16 w : net.w1) {
@@ -291,7 +373,22 @@ template<class Layout>
         return false;
     }
 
-    refresh_network_traits(net);
+    refresh_network_traits<Layout>(net);
+    return net.valid();
+}
+
+[[nodiscard]] bool read_network_payload(std::istream& in, H32Network& net) {
+    resize_network(net);
+    if (!read_exact(in, net.coarse_w.data(), net.coarse_w.size())
+        || !read_exact(in, net.coarse_b.data(), net.coarse_b.size())
+        || !read_exact(in, net.fine_w.data(), net.fine_w.size())
+        || !read_exact(in, net.fine_b.data(), net.fine_b.size())
+        || !read_exact(in, net.w1.data(), net.w1.size())
+        || !read_exact(in, net.b1.data(), net.b1.size())) {
+        clear_network(net);
+        return false;
+    }
+    refresh_network_traits<P2H32Layout>(net);
     return net.valid();
 }
 
@@ -401,6 +498,77 @@ template<class Layout>
     );
 }
 
+[[nodiscard]] bool load_h32_from_stream(
+    std::istream& in,
+    H32Network& net,
+    const std::string& path,
+    std::uintmax_t known_size = 0
+) {
+    clear_network(net);
+    FileHeader header{};
+    if (!read_exact(in, &header, 1)) {
+        net.error = "could not read H32 header";
+        g_error = net.error;
+        return false;
+    }
+
+    if (header.magic != kMnueMagic || header.version != kMnueVersion) {
+        if (known_size == h32_payload_bytes()) {
+            in.clear();
+            in.seekg(0, std::ios::beg);
+            if (read_network_payload(in, net)) {
+                net.loaded = true;
+                net.path = path;
+                g_error.clear();
+                return true;
+            }
+        }
+        net.error = "bad H32 magic/version";
+        g_error = net.error;
+        return false;
+    }
+
+    if (header.arch != P2H32Layout::ArchId
+        || header.input_size != P2H32Layout::InputSize
+        || header.hidden_size != P2H32Layout::HiddenSize
+        || header.input_buckets != P2H32Layout::InputBuckets
+        || header.output_buckets != P2H32Layout::OutputBuckets
+        || header.qa != kQa
+        || header.qb != kQb) {
+        net.error = "MNUE header dimensions do not match P2-H32";
+        g_error = net.error;
+        return false;
+    }
+
+    net.scale = header.scale;
+    if (!read_network_payload(in, net)) {
+        net.error = "truncated P2-H32 weight file";
+        g_error = net.error;
+        return false;
+    }
+    net.loaded = true;
+    net.path = path;
+    g_error.clear();
+    return true;
+}
+
+[[nodiscard]] bool load_network(H32Network& net, const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        net.error = "could not open MNUE file: " + path;
+        g_error = net.error;
+        return false;
+    }
+    std::error_code ec;
+    const auto file_sz = std::filesystem::file_size(path, ec);
+    return load_h32_from_stream(
+        in,
+        net,
+        path,
+        ec ? static_cast<std::uintmax_t>(0) : file_sz
+    );
+}
+
 [[nodiscard]] inline Square flip_vertical_sq(Square sq) noexcept {
     return static_cast<Square>(static_cast<int>(sq) ^ 56);
 }
@@ -444,6 +612,168 @@ template<class Layout>
     const int file_group = std::min(file, 7 - file); // 0..3, horizontal mirror
     const int rank = rank_of(relative_king_sq);      // 0..7
     return rank * 4 + file_group;                    // 0..31
+}
+
+struct H32Perspective {
+    std::uint16_t coarse_base;
+    std::uint16_t fine_base;
+    std::uint8_t coarse_bucket;
+    std::uint8_t fine_bucket;
+    std::uint8_t square_xor;
+    bool mirror;
+};
+
+static_assert(sizeof(H32Perspective) == 8);
+
+struct H32FeatureDelta {
+    static constexpr std::uint16_t None = std::numeric_limits<std::uint16_t>::max();
+    std::uint16_t coarse = None;
+    std::uint16_t fine = None;
+
+    [[nodiscard]] int coarse_index() const noexcept {
+        return coarse == None ? -1 : static_cast<int>(coarse);
+    }
+
+    [[nodiscard]] int fine_index() const noexcept {
+        return fine == None ? -1 : static_cast<int>(fine);
+    }
+};
+
+static_assert(sizeof(H32FeatureDelta) == 2 * sizeof(std::uint16_t));
+
+[[nodiscard]] inline H32Perspective h32_perspective(
+    const Position& pos,
+    Color perspective
+) noexcept {
+    static constexpr auto transforms = [] {
+        std::array<std::array<H32Perspective, SQ_NB>, COLOR_NB> table{};
+        for (int persp = WHITE; persp <= BLACK; ++persp) {
+            for (int square = 0; square < SQ_NB; ++square) {
+                const int vertical_xor = persp == BLACK ? 56 : 0;
+                const int relative = square ^ vertical_xor;
+                const bool mirror = (relative & 7) >= 4;
+                const int canonical = relative ^ (mirror ? 7 : 0);
+                const int file = canonical & 7;
+                const int rank = canonical >> 3;
+                const int coarse_bucket = (rank / 2) * 4 + file;
+                const int fine_bucket = rank * 4 + file;
+                table[static_cast<std::size_t>(persp)]
+                     [static_cast<std::size_t>(square)] = {
+                    .coarse_base = static_cast<std::uint16_t>(
+                        coarse_bucket * 10 * 64
+                    ),
+                    .fine_base = static_cast<std::uint16_t>(
+                        fine_bucket * 11 * 64
+                    ),
+                    .coarse_bucket = static_cast<std::uint8_t>(coarse_bucket),
+                    .fine_bucket = static_cast<std::uint8_t>(fine_bucket),
+                    .square_xor = static_cast<std::uint8_t>(
+                        vertical_xor ^ (mirror ? 7 : 0)
+                    ),
+                    .mirror = mirror
+                };
+            }
+        }
+        return table;
+    }();
+    return transforms[static_cast<std::size_t>(perspective)]
+                     [static_cast<std::size_t>(king_square_of(pos, perspective))];
+}
+
+[[nodiscard]] inline int h32_phase4(const Position& pos) noexcept {
+    static constexpr std::array<std::uint8_t, 25> buckets{
+        3, 3, 3, 3, 3, 3,
+        2, 2, 2, 2, 2, 2,
+        1, 1, 1, 1, 1, 1,
+        0, 0, 0, 0, 0, 0, 0
+    };
+    return buckets[static_cast<std::size_t>(
+        std::clamp(mnue_phase_units(pos), 0, 24)
+    )];
+}
+
+[[nodiscard]] inline int h32_output_bucket(const Position& pos) noexcept {
+    const Color stm = static_cast<Color>(pos.side_to_move);
+    const Square relative_king = relative_square(stm, king_square_of(pos, stm));
+    const int file = file_of(relative_king);
+    const int canonical_file = file < 4 ? file : 7 - file;
+    const int coarse_bucket = (rank_of(relative_king) / 2) * 4 + canonical_file;
+    return h32_phase4(pos) * P2H32Layout::CoarseInputBuckets
+        + coarse_bucket;
+}
+
+[[nodiscard]] inline int h32_coarse_feature_index(
+    Color perspective,
+    const H32Perspective& transform,
+    Piece pc,
+    Square sq
+) noexcept {
+    const int pt = nonking_piece_index(type_of(pc));
+    if (pt < 0)
+        return -1;
+    const int rel_color = color_of(pc) == perspective ? 0 : 1;
+    const int canonical = static_cast<int>(sq) ^ transform.square_xor;
+    return (((transform.coarse_bucket * 2 + rel_color) * 5 + pt) * 64)
+        + canonical;
+}
+
+[[nodiscard]] inline int h32_fine_feature_index(
+    Color perspective,
+    const H32Perspective& transform,
+    Piece pc,
+    Square sq
+) noexcept {
+    if (pc == PIECE_NONE)
+        return -1;
+    const PieceType type = type_of(pc);
+    const int rel_color = color_of(pc) == perspective ? 0 : 1;
+    int plane = -1;
+    if (type == KING) {
+        if (rel_color == 0)
+            return -1;
+        plane = 10;
+    } else {
+        const int pt = nonking_piece_index(type);
+        if (pt < 0)
+            return -1;
+        plane = rel_color * 5 + pt;
+    }
+    const int canonical = static_cast<int>(sq) ^ transform.square_xor;
+    return ((transform.fine_bucket * 11 + plane) * 64) + canonical;
+}
+
+[[nodiscard]] inline H32FeatureDelta h32_feature_indices(
+    Color perspective,
+    const H32Perspective& transform,
+    Piece pc,
+    Square sq
+) noexcept {
+    if (pc == PIECE_NONE)
+        return {};
+    const PieceType type = type_of(pc);
+    const int rel_color = color_of(pc) == perspective ? 0 : 1;
+    const int canonical = static_cast<int>(sq) ^ transform.square_xor;
+    if (type == KING) {
+        return {
+            .coarse = H32FeatureDelta::None,
+            .fine = rel_color == 1
+                ? static_cast<std::uint16_t>(
+                    transform.fine_base + 10 * 64 + canonical
+                )
+                : H32FeatureDelta::None
+        };
+    }
+    const int pt = nonking_piece_index(type);
+    if (pt < 0)
+        return {};
+    return {
+        .coarse = static_cast<std::uint16_t>(
+            transform.coarse_base + (rel_color * 5 + pt) * 64 + canonical
+        ),
+        .fine = static_cast<std::uint16_t>(
+            transform.fine_base + (rel_color * 5 + pt) * 64 + canonical
+        )
+    };
 }
 
 [[nodiscard]] inline int phase_bucket2(const Position& pos) noexcept {
@@ -963,6 +1293,421 @@ void rebuild_accumulator(
         if (idx >= 0)
             add_feature(acc, net, idx);
     }
+}
+
+using H32Accumulator = Accumulator<P2H32Layout>;
+
+template<int Offset, int Width>
+void h32_apply_segment(
+    H32Accumulator& acc,
+    const i16* weights,
+    bool add
+) noexcept {
+#if defined(__AVX2__)
+    static_assert(Width % 16 == 0);
+    for (int i = 0; i < Width; i += 16) {
+        i16* dst = acc.data() + Offset + i;
+        const __m256i a = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(dst)
+        );
+        const __m256i w = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(weights + i)
+        );
+        const __m256i value = add
+            ? _mm256_add_epi16(a, w)
+            : _mm256_sub_epi16(a, w);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst), value);
+    }
+#else
+    for (int i = 0; i < Width; ++i) {
+        const int index = Offset + i;
+        const i32 value = static_cast<i32>(acc[static_cast<std::size_t>(index)])
+            + (add ? static_cast<i32>(weights[i]) : -static_cast<i32>(weights[i]));
+        acc[static_cast<std::size_t>(index)] = static_cast<i16>(value);
+    }
+#endif
+}
+
+void h32_apply_feature(
+    H32Accumulator& acc,
+    const H32Network& net,
+    const H32FeatureDelta& feature,
+    bool add
+) noexcept {
+    const int coarse = feature.coarse_index();
+    const int fine = feature.fine_index();
+    if (coarse >= 0) {
+        const i16* weights = net.coarse_w.data()
+            + static_cast<std::size_t>(coarse)
+                * P2H32Layout::CoarseHiddenSize;
+        h32_apply_segment<0, P2H32Layout::CoarseHiddenSize>(acc, weights, add);
+    }
+    if (fine >= 0) {
+        const i16* weights = net.fine_w.data()
+            + static_cast<std::size_t>(fine) * P2H32Layout::FineHiddenSize;
+        h32_apply_segment<
+            P2H32Layout::CoarseHiddenSize,
+            P2H32Layout::FineHiddenSize
+        >(acc, weights, add);
+    }
+}
+
+void rebuild_h32_accumulator(
+    const Position& pos,
+    Color perspective,
+    H32Accumulator& acc,
+    const H32Network& net
+) noexcept {
+    std::copy(net.coarse_b.begin(), net.coarse_b.end(), acc.begin());
+    std::copy(
+        net.fine_b.begin(),
+        net.fine_b.end(),
+        acc.begin() + P2H32Layout::CoarseHiddenSize
+    );
+    const H32Perspective transform = h32_perspective(pos, perspective);
+    Bitboard bb = pieces(pos);
+    while (bb) {
+        const Square sq = static_cast<Square>(
+            std::countr_zero(static_cast<std::uint64_t>(bb))
+        );
+        bb &= bb - 1;
+        const Piece pc = piece_on(pos, sq);
+        const H32FeatureDelta feature = h32_feature_indices(
+            perspective,
+            transform,
+            pc,
+            sq
+        );
+        h32_apply_feature(acc, net, feature, true);
+    }
+}
+
+struct H32PerspectiveDiff {
+    std::array<H32FeatureDelta, 2> removed{};
+    std::array<H32FeatureDelta, 2> added{};
+    std::uint8_t removed_count = 0;
+    std::uint8_t added_count = 0;
+    bool refresh = false;
+};
+
+using H32MoveDiff = std::array<H32PerspectiveDiff, COLOR_NB>;
+
+void append_h32_feature(
+    H32MoveDiff& move_diff,
+    const std::array<H32Perspective, COLOR_NB>& transforms,
+    Piece pc,
+    Square sq,
+    bool added
+) noexcept {
+    if (pc == PIECE_NONE)
+        return;
+    for (int persp = WHITE; persp <= BLACK; ++persp) {
+        H32PerspectiveDiff& diff = move_diff[static_cast<std::size_t>(persp)];
+        if (diff.refresh)
+            continue;
+        const Color perspective = static_cast<Color>(persp);
+        const H32FeatureDelta delta = h32_feature_indices(
+            perspective,
+            transforms[static_cast<std::size_t>(persp)],
+            pc,
+            sq
+        );
+        if (delta.coarse == H32FeatureDelta::None
+            && delta.fine == H32FeatureDelta::None)
+            continue;
+        if (added) {
+            assert(diff.added_count < diff.added.size());
+            diff.added[diff.added_count++] = delta;
+        } else {
+            assert(diff.removed_count < diff.removed.size());
+            diff.removed[diff.removed_count++] = delta;
+        }
+    }
+}
+
+[[nodiscard]] H32MoveDiff make_h32_move_diff(
+    const Position& pos,
+    Move move
+) noexcept {
+    H32MoveDiff move_diff{};
+    const std::array<H32Perspective, COLOR_NB> transforms{{
+        h32_perspective(pos, WHITE),
+        h32_perspective(pos, BLACK)
+    }};
+    const Square from = from_sq(move);
+    const Square encoded_to = to_sq(move);
+    const Piece moving = piece_on(pos, from);
+    assert(moving != PIECE_NONE);
+    const Color moving_color = color_of(moving);
+    const Square to = move_is_castle(move)
+        ? castling_king_to(moving_color, move_flag(move))
+        : encoded_to;
+
+    if (type_of(moving) == KING)
+        move_diff[static_cast<std::size_t>(moving_color)].refresh = true;
+
+    if (move_is_capture(move)) {
+        const Square captured_sq = move_is_ep(move)
+            ? static_cast<Square>(
+                static_cast<int>(to) + (moving_color == WHITE ? -8 : 8)
+            )
+            : to;
+        append_h32_feature(
+            move_diff,
+            transforms,
+            piece_on(pos, captured_sq),
+            captured_sq,
+            false
+        );
+    }
+
+    append_h32_feature(move_diff, transforms, moving, from, false);
+    const Piece placed = move_is_promotion(move)
+        ? make_piece(moving_color, promo_piece(move))
+        : moving;
+    append_h32_feature(move_diff, transforms, placed, to, true);
+
+    if (move_is_castle(move)) {
+        const Square rook_from = encoded_to;
+        const Square rook_to = castling_rook_to(moving_color, move_flag(move));
+        const Piece rook = make_piece(moving_color, ROOK);
+        append_h32_feature(move_diff, transforms, rook, rook_from, false);
+        append_h32_feature(move_diff, transforms, rook, rook_to, true);
+    }
+    return move_diff;
+}
+
+template<bool Fine, int Offset, int Width, int AddCount, int SubCount>
+void apply_h32_diff_segment(
+    H32Accumulator& dst,
+    const H32Accumulator& src,
+    const H32Network& net,
+    const std::array<H32FeatureDelta, 2>& added,
+    const std::array<H32FeatureDelta, 2>& removed
+) noexcept {
+    const auto feature_index = [](const H32FeatureDelta& delta) noexcept {
+        if constexpr (Fine)
+            return delta.fine_index();
+        else
+            return delta.coarse_index();
+    };
+    const auto weight_ptr = [&](const H32FeatureDelta& delta) noexcept -> const i16* {
+        const int feature = feature_index(delta);
+        if (feature < 0)
+            return nullptr;
+        if constexpr (Fine) {
+            return net.fine_w.data()
+                + static_cast<std::size_t>(feature) * P2H32Layout::FineHiddenSize;
+        } else {
+            return net.coarse_w.data()
+                + static_cast<std::size_t>(feature) * P2H32Layout::CoarseHiddenSize;
+        }
+    };
+    const i16* add0 = AddCount >= 1 ? weight_ptr(added[0]) : nullptr;
+    const i16* add1 = AddCount >= 2 ? weight_ptr(added[1]) : nullptr;
+    const i16* sub0 = SubCount >= 1 ? weight_ptr(removed[0]) : nullptr;
+    const i16* sub1 = SubCount >= 2 ? weight_ptr(removed[1]) : nullptr;
+
+#if defined(__AVX2__)
+    for (int i = 0; i < Width; i += 16) {
+        __m256i value = _mm256_load_si256(
+            reinterpret_cast<const __m256i*>(src.data() + Offset + i)
+        );
+        if (add0 != nullptr)
+            value = _mm256_add_epi16(
+                value,
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(add0 + i))
+            );
+        if (add1 != nullptr)
+            value = _mm256_add_epi16(
+                value,
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(add1 + i))
+            );
+        if (sub0 != nullptr)
+            value = _mm256_sub_epi16(
+                value,
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(sub0 + i))
+            );
+        if (sub1 != nullptr)
+            value = _mm256_sub_epi16(
+                value,
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(sub1 + i))
+            );
+        _mm256_store_si256(
+            reinterpret_cast<__m256i*>(dst.data() + Offset + i),
+            value
+        );
+    }
+#else
+    for (int i = 0; i < Width; ++i) {
+        i32 value = src[static_cast<std::size_t>(Offset + i)];
+        if (add0 != nullptr) value += add0[i];
+        if (add1 != nullptr) value += add1[i];
+        if (sub0 != nullptr) value -= sub0[i];
+        if (sub1 != nullptr) value -= sub1[i];
+        dst[static_cast<std::size_t>(Offset + i)] = static_cast<i16>(value);
+    }
+#endif
+}
+
+template<int AddCount, int SubCount>
+void apply_h32_diff_counts(
+    H32Accumulator& dst,
+    const H32Accumulator& src,
+    const H32Network& net,
+    const std::array<H32FeatureDelta, 2>& added,
+    const std::array<H32FeatureDelta, 2>& removed
+) noexcept {
+    apply_h32_diff_segment<
+        false,
+        0,
+        P2H32Layout::CoarseHiddenSize,
+        AddCount,
+        SubCount
+    >(dst, src, net, added, removed);
+    apply_h32_diff_segment<
+        true,
+        P2H32Layout::CoarseHiddenSize,
+        P2H32Layout::FineHiddenSize,
+        AddCount,
+        SubCount
+    >(dst, src, net, added, removed);
+}
+
+void apply_h32_diff(
+    H32Accumulator& dst,
+    const H32Accumulator& src,
+    const H32Network& net,
+    const H32PerspectiveDiff& diff,
+    bool forward
+) noexcept {
+    const auto& added = forward ? diff.added : diff.removed;
+    const auto& removed = forward ? diff.removed : diff.added;
+    const auto added_count = forward ? diff.added_count : diff.removed_count;
+    const auto removed_count = forward ? diff.removed_count : diff.added_count;
+    switch ((static_cast<unsigned>(added_count) << 2) | removed_count) {
+        case 0x0: apply_h32_diff_counts<0, 0>(dst, src, net, added, removed); break;
+        case 0x1: apply_h32_diff_counts<0, 1>(dst, src, net, added, removed); break;
+        case 0x2: apply_h32_diff_counts<0, 2>(dst, src, net, added, removed); break;
+        case 0x4: apply_h32_diff_counts<1, 0>(dst, src, net, added, removed); break;
+        case 0x5: apply_h32_diff_counts<1, 1>(dst, src, net, added, removed); break;
+        case 0x6: apply_h32_diff_counts<1, 2>(dst, src, net, added, removed); break;
+        case 0x8: apply_h32_diff_counts<2, 0>(dst, src, net, added, removed); break;
+        case 0x9: apply_h32_diff_counts<2, 1>(dst, src, net, added, removed); break;
+        case 0xA: apply_h32_diff_counts<2, 2>(dst, src, net, added, removed); break;
+        default: assert(false); break;
+    }
+}
+
+struct H32RefreshEntry {
+    H32Accumulator accumulation{};
+    std::array<Piece, SQ_NB> canonical_board{};
+    bool initialized = false;
+};
+
+struct H32RefreshCache {
+    u32 generation = 0;
+    std::array<std::array<H32RefreshEntry, P2H32Layout::FineInputBuckets>, COLOR_NB>
+        entries{};
+
+    void sync(u32 current_generation) noexcept {
+        if (generation == current_generation)
+            return;
+        for (auto& side : entries)
+            for (auto& entry : side)
+                entry.initialized = false;
+        generation = current_generation;
+    }
+};
+
+[[nodiscard]] H32FeatureDelta h32_canonical_feature_indices(
+    Color perspective,
+    const H32Perspective& transform,
+    Piece pc,
+    int canonical_sq
+) noexcept {
+    if (pc == PIECE_NONE)
+        return {};
+    const int rel_color = color_of(pc) == perspective ? 0 : 1;
+    if (type_of(pc) == KING) {
+        if (rel_color == 0)
+            return {};
+        return {
+            .coarse = H32FeatureDelta::None,
+            .fine = static_cast<std::uint16_t>(
+                transform.fine_base + 10 * 64 + canonical_sq
+            )
+        };
+    }
+    const int pt = nonking_piece_index(type_of(pc));
+    if (pt < 0)
+        return {};
+    return {
+        .coarse = static_cast<std::uint16_t>(
+            transform.coarse_base + (rel_color * 5 + pt) * 64 + canonical_sq
+        ),
+        .fine = static_cast<std::uint16_t>(
+            transform.fine_base + (rel_color * 5 + pt) * 64 + canonical_sq
+        )
+    };
+}
+
+void refresh_h32_accumulator_from_cache(
+    H32RefreshCache& cache,
+    const H32Network& net,
+    const Position& pos,
+    Color perspective,
+    u32 current_generation,
+    H32Accumulator& out
+) noexcept {
+    cache.sync(current_generation);
+    const H32Perspective transform = h32_perspective(pos, perspective);
+    H32RefreshEntry& entry =
+        cache.entries[static_cast<std::size_t>(perspective)]
+                     [static_cast<std::size_t>(transform.fine_bucket)];
+    if (!entry.initialized) {
+        std::copy(net.coarse_b.begin(), net.coarse_b.end(), entry.accumulation.begin());
+        std::copy(
+            net.fine_b.begin(),
+            net.fine_b.end(),
+            entry.accumulation.begin() + P2H32Layout::CoarseHiddenSize
+        );
+        entry.canonical_board.fill(PIECE_NONE);
+        entry.initialized = true;
+    }
+
+    std::array<Piece, SQ_NB> current{};
+    current.fill(PIECE_NONE);
+    Bitboard bb = pieces(pos);
+    while (bb) {
+        const Square sq = static_cast<Square>(
+            std::countr_zero(static_cast<std::uint64_t>(bb))
+        );
+        bb &= bb - 1;
+        const int canonical = static_cast<int>(sq) ^ transform.square_xor;
+        current[static_cast<std::size_t>(canonical)] = piece_on(pos, sq);
+    }
+
+    for (int sq = 0; sq < SQ_NB; ++sq) {
+        const Piece old_pc = entry.canonical_board[static_cast<std::size_t>(sq)];
+        const Piece new_pc = current[static_cast<std::size_t>(sq)];
+        if (old_pc == new_pc)
+            continue;
+        h32_apply_feature(
+            entry.accumulation,
+            net,
+            h32_canonical_feature_indices(perspective, transform, old_pc, sq),
+            false
+        );
+        h32_apply_feature(
+            entry.accumulation,
+            net,
+            h32_canonical_feature_indices(perspective, transform, new_pc, sq),
+            true
+        );
+        entry.canonical_board[static_cast<std::size_t>(sq)] = new_pc;
+    }
+    out = entry.accumulation;
 }
 
 [[nodiscard]] inline i32 screlu(i32 x) noexcept {
@@ -1517,15 +2262,13 @@ inline void screlu_square_bytes_avx2(
 }
 #endif
 
-template<class Layout>
-[[nodiscard]] int forward(
-    const Position& pos,
-    const Network<Layout>& net,
+template<class Layout, class Net>
+[[nodiscard]] int forward_selected(
+    int bucket,
+    const Net& net,
     const Accumulator<Layout>& stm_acc,
     const Accumulator<Layout>& nstm_acc
 ) noexcept {
-    const Color stm = static_cast<Color>(pos.side_to_move);
-    const int bucket = output_bucket<Layout>(pos, stm);
     const std::size_t base = static_cast<std::size_t>(bucket) * 2 * Layout::HiddenSize;
     const i16* w_stm = net.w1.data() + base;
     const i16* w_nstm = w_stm + Layout::HiddenSize;
@@ -1607,6 +2350,36 @@ template<class Layout>
 }
 
 template<class Layout>
+[[nodiscard]] int forward(
+    const Position& pos,
+    const Network<Layout>& net,
+    const Accumulator<Layout>& stm_acc,
+    const Accumulator<Layout>& nstm_acc
+) noexcept {
+    const Color stm = static_cast<Color>(pos.side_to_move);
+    return forward_selected<Layout>(
+        output_bucket<Layout>(pos, stm),
+        net,
+        stm_acc,
+        nstm_acc
+    );
+}
+
+[[nodiscard]] int forward_h32(
+    const Position& pos,
+    const H32Network& net,
+    const H32Accumulator& stm_acc,
+    const H32Accumulator& nstm_acc
+) noexcept {
+    return forward_selected<P2H32Layout>(
+        h32_output_bucket(pos),
+        net,
+        stm_acc,
+        nstm_acc
+    );
+}
+
+template<class Layout>
 [[nodiscard]] int forward_reference(
     const Position& pos,
     const Network<Layout>& net,
@@ -1633,6 +2406,31 @@ template<class Layout>
     output *= net.scale;
     output /= static_cast<i64>(kQa) * kQb;
 
+    return static_cast<int>(std::clamp<i64>(output, -32000, 32000));
+}
+
+[[nodiscard]] int forward_h32_reference(
+    const Position& pos,
+    const H32Network& net,
+    const H32Accumulator& stm_acc,
+    const H32Accumulator& nstm_acc
+) noexcept {
+    const int bucket = h32_output_bucket(pos);
+    const std::size_t base = static_cast<std::size_t>(bucket)
+        * 2 * P2H32Layout::HiddenSize;
+    const i16* w_stm = net.w1.data() + base;
+    const i16* w_nstm = w_stm + P2H32Layout::HiddenSize;
+    i64 output = 0;
+    for (int i = 0; i < P2H32Layout::HiddenSize; ++i) {
+        output += static_cast<i64>(screlu(stm_acc[static_cast<std::size_t>(i)]))
+            * static_cast<i64>(w_stm[i]);
+        output += static_cast<i64>(screlu(nstm_acc[static_cast<std::size_t>(i)]))
+            * static_cast<i64>(w_nstm[i]);
+    }
+    output /= kQa;
+    output += static_cast<i64>(net.b1[static_cast<std::size_t>(bucket)]);
+    output *= net.scale;
+    output /= static_cast<i64>(kQa) * kQb;
     return static_cast<int>(std::clamp<i64>(output, -32000, 32000));
 }
 
@@ -1837,9 +2635,132 @@ struct P2StackStateSet {
     }
 };
 
+struct H32StackStateSet {
+    static constexpr std::size_t Capacity = P2AccumulatorStack::Capacity;
+
+    struct alignas(64) State {
+        alignas(64) std::array<H32Accumulator, COLOR_NB> accumulation{};
+        H32MoveDiff diff{};
+        std::uint8_t computed_mask = 0;
+    };
+
+    std::array<State, Capacity> states{};
+    H32RefreshCache refresh_cache{};
+    std::size_t state_count = 1;
+    u32 generation = 0;
+
+    void sync_generation(u32 current) noexcept {
+        if (generation == current)
+            return;
+        for (std::size_t i = 0; i < state_count; ++i)
+            states[i].computed_mask = 0;
+        refresh_cache.sync(current);
+        generation = current;
+    }
+
+    void reset(u32 current) noexcept {
+        sync_generation(current);
+        state_count = 1;
+        states[0].diff = {};
+        states[0].computed_mask = 0;
+    }
+
+    void push(const Position& pos, Move move, u32 current) noexcept {
+        sync_generation(current);
+        if (state_count >= states.size()) {
+            assert(false && "H32 accumulator stack overflow");
+            std::abort();
+        }
+        State& next = states[state_count++];
+        next.diff = make_h32_move_diff(pos, move);
+        next.computed_mask = 0;
+    }
+
+    void pop() noexcept {
+        if (state_count <= 1) {
+            assert(false && "H32 accumulator stack underflow");
+            std::abort();
+        }
+        --state_count;
+    }
+
+    [[nodiscard]] const H32Accumulator& ensure(
+        const Position& pos,
+        Color perspective,
+        const H32Network& net,
+        u32 current
+    ) noexcept {
+        sync_generation(current);
+        const std::uint8_t mask = p2_perspective_mask(perspective);
+        const std::size_t index = state_count - 1;
+        if ((states[index].computed_mask & mask) != 0)
+            return states[index].accumulation[static_cast<std::size_t>(perspective)];
+
+        std::size_t boundary = index;
+        bool found = false;
+        for (std::size_t i = index;; --i) {
+            if ((states[i].computed_mask & mask) != 0) {
+                boundary = i;
+                found = true;
+                break;
+            }
+            if (i > 0
+                && states[i].diff[static_cast<std::size_t>(perspective)].refresh) {
+                boundary = i;
+                break;
+            }
+            if (i == 0) {
+                boundary = 0;
+                break;
+            }
+        }
+
+        if (found) {
+            for (std::size_t i = boundary + 1; i <= index; ++i) {
+                apply_h32_diff(
+                    states[i].accumulation[static_cast<std::size_t>(perspective)],
+                    states[i - 1].accumulation[static_cast<std::size_t>(perspective)],
+                    net,
+                    states[i].diff[static_cast<std::size_t>(perspective)],
+                    true
+                );
+                states[i].computed_mask = static_cast<std::uint8_t>(
+                    states[i].computed_mask | mask
+                );
+            }
+        } else {
+            refresh_h32_accumulator_from_cache(
+                refresh_cache,
+                net,
+                pos,
+                perspective,
+                generation,
+                states[index].accumulation[static_cast<std::size_t>(perspective)]
+            );
+            states[index].computed_mask = static_cast<std::uint8_t>(
+                states[index].computed_mask | mask
+            );
+            for (std::size_t i = index; i > boundary; --i) {
+                apply_h32_diff(
+                    states[i - 1].accumulation[static_cast<std::size_t>(perspective)],
+                    states[i].accumulation[static_cast<std::size_t>(perspective)],
+                    net,
+                    states[i].diff[static_cast<std::size_t>(perspective)],
+                    false
+                );
+                states[i - 1].computed_mask = static_cast<std::uint8_t>(
+                    states[i - 1].computed_mask | mask
+                );
+            }
+        }
+        return states[index].accumulation[static_cast<std::size_t>(perspective)];
+    }
+};
+
 struct P2AccumulatorStack::Impl {
     std::unique_ptr<P2StackStateSet<P2Layout>> p2;
     std::unique_ptr<P2StackStateSet<P2K32Layout>> p2k32;
+    std::unique_ptr<H32StackStateSet> p2h32;
     std::unique_ptr<P2StackStateSet<P2ProLayout>> p2pro;
 
     [[nodiscard]] P2StackStateSet<P2Layout>& p2_state() {
@@ -1852,6 +2773,12 @@ struct P2AccumulatorStack::Impl {
         if (!p2k32)
             p2k32 = std::make_unique<P2StackStateSet<P2K32Layout>>();
         return *p2k32;
+    }
+
+    [[nodiscard]] H32StackStateSet& p2h32_state() {
+        if (!p2h32)
+            p2h32 = std::make_unique<H32StackStateSet>();
+        return *p2h32;
     }
 
     [[nodiscard]] P2StackStateSet<P2ProLayout>& p2pro_state() {
@@ -1873,6 +2800,9 @@ struct P2AccumulatorStack::Impl {
             case P2ActiveKind::P2K32:
                 p2k32_state().reset(current);
                 break;
+            case P2ActiveKind::P2H32:
+                p2h32_state().reset(current);
+                break;
             case P2ActiveKind::P2Pro:
                 p2pro_state().reset(current);
                 break;
@@ -1881,6 +2811,8 @@ struct P2AccumulatorStack::Impl {
                     p2->reset(current);
                 if (p2k32)
                     p2k32->reset(current);
+                if (p2h32)
+                    p2h32->reset(current);
                 if (p2pro)
                     p2pro->reset(current);
                 break;
@@ -1895,6 +2827,9 @@ struct P2AccumulatorStack::Impl {
                 break;
             case P2ActiveKind::P2K32:
                 p2k32_state().push(pos, move, current);
+                break;
+            case P2ActiveKind::P2H32:
+                p2h32_state().push(pos, move, current);
                 break;
             case P2ActiveKind::P2Pro:
                 p2pro_state().push(pos, move, current);
@@ -1914,6 +2849,10 @@ struct P2AccumulatorStack::Impl {
                 if (p2k32)
                     p2k32->pop();
                 break;
+            case P2ActiveKind::P2H32:
+                if (p2h32)
+                    p2h32->pop();
+                break;
             case P2ActiveKind::P2Pro:
                 if (p2pro)
                     p2pro->pop();
@@ -1929,6 +2868,8 @@ struct P2AccumulatorStack::Impl {
                 return p2 ? p2->state_count : 1;
             case P2ActiveKind::P2K32:
                 return p2k32 ? p2k32->state_count : 1;
+            case P2ActiveKind::P2H32:
+                return p2h32 ? p2h32->state_count : 1;
             case P2ActiveKind::P2Pro:
                 return p2pro ? p2pro->state_count : 1;
             case P2ActiveKind::None:
@@ -1957,6 +2898,18 @@ struct P2AccumulatorStack::Impl {
             pos,
             perspective,
             g_p2k32,
+            current_generation()
+        );
+    }
+
+    [[nodiscard]] const H32Accumulator& ensure_p2h32(
+        const Position& pos,
+        Color perspective
+    ) noexcept {
+        return p2h32_state().ensure(
+            pos,
+            perspective,
+            g_p2h32,
             current_generation()
         );
     }
@@ -2004,6 +2957,7 @@ bool load_p2(const std::string& path) {
     if (load_network(p2_candidate, path)) {
         g_p2 = std::move(p2_candidate);
         clear_network(g_p2k32);
+        clear_network(g_p2h32);
         clear_network(g_p2pro);
         g_p2_active = P2ActiveKind::P2;
         (void)next_p2_generation();
@@ -2015,6 +2969,7 @@ bool load_p2(const std::string& path) {
     if (load_network(p2k32_candidate, path)) {
         clear_network(g_p2);
         g_p2k32 = std::move(p2k32_candidate);
+        clear_network(g_p2h32);
         clear_network(g_p2pro);
         g_p2_active = P2ActiveKind::P2K32;
         (void)next_p2_generation();
@@ -2022,10 +2977,23 @@ bool load_p2(const std::string& path) {
     }
 
     const std::string p2k32_error = g_error;
+    H32Network p2h32_candidate{};
+    if (load_network(p2h32_candidate, path)) {
+        clear_network(g_p2);
+        clear_network(g_p2k32);
+        g_p2h32 = std::move(p2h32_candidate);
+        clear_network(g_p2pro);
+        g_p2_active = P2ActiveKind::P2H32;
+        (void)next_p2_generation();
+        return true;
+    }
+
+    const std::string p2h32_error = g_error;
     Network<P2ProLayout> p2pro_candidate{};
     if (load_network(p2pro_candidate, path)) {
         clear_network(g_p2);
         clear_network(g_p2k32);
+        clear_network(g_p2h32);
         g_p2pro = std::move(p2pro_candidate);
         g_p2_active = P2ActiveKind::P2Pro;
         (void)next_p2_generation();
@@ -2035,9 +3003,11 @@ bool load_p2(const std::string& path) {
     g_p2_active = P2ActiveKind::None;
     clear_network(g_p2);
     clear_network(g_p2k32);
+    clear_network(g_p2h32);
     clear_network(g_p2pro);
-    g_error = "failed to load MNUE P2/P2-K32/P2Pro: P2: " + p2_error
+    g_error = "failed to load MNUE P2/P2-K32/P2-H32/P2Pro: P2: " + p2_error
         + "; P2-K32: " + p2k32_error
+        + "; P2-H32: " + p2h32_error
         + "; P2Pro: " + g_error;
     return false;
 }
@@ -2046,6 +3016,44 @@ bool load_p4(const std::string& path) {
     return load_network(g_p4, path);
 }
 
+class MemoryInputBuffer final : public std::streambuf {
+public:
+    MemoryInputBuffer(const char* begin, const char* end) {
+        char* first = const_cast<char*>(begin);
+        setg(first, first, const_cast<char*>(end));
+    }
+
+protected:
+    pos_type seekoff(
+        off_type offset,
+        std::ios_base::seekdir direction,
+        std::ios_base::openmode mode
+    ) override {
+        if ((mode & std::ios_base::in) == 0)
+            return pos_type(off_type(-1));
+
+        off_type base = 0;
+        if (direction == std::ios_base::cur)
+            base = static_cast<off_type>(gptr() - eback());
+        else if (direction == std::ios_base::end)
+            base = static_cast<off_type>(egptr() - eback());
+        else if (direction != std::ios_base::beg)
+            return pos_type(off_type(-1));
+
+        const off_type next = base + offset;
+        const off_type size = static_cast<off_type>(egptr() - eback());
+        if (next < 0 || next > size)
+            return pos_type(off_type(-1));
+
+        setg(eback(), eback() + next, egptr());
+        return pos_type(next);
+    }
+
+    pos_type seekpos(pos_type position, std::ios_base::openmode mode) override {
+        return seekoff(off_type(position), std::ios_base::beg, mode);
+    }
+};
+
 template<class Layout>
 [[nodiscard]] bool load_p2_family_from_memory(
     Network<Layout>& target,
@@ -2053,15 +3061,8 @@ template<class Layout>
     std::size_t size,
     const std::string& path
 ) {
-    struct MemBuf : std::streambuf {
-        MemBuf(const char* b, const char* e) {
-            char* gb = const_cast<char*>(b);
-            char* ge = const_cast<char*>(e);
-            setg(gb, gb, ge);
-        }
-    } buf(data, data + size);
-
-    std::istream stream(&buf);
+    MemoryInputBuffer buffer(data, data + size);
+    std::istream stream(&buffer);
     Network<Layout> candidate{};
     if (!load_network_from_stream(
             stream,
@@ -2072,6 +3073,21 @@ template<class Layout>
         return false;
     }
 
+    target = std::move(candidate);
+    return true;
+}
+
+[[nodiscard]] bool load_p2_family_from_memory(
+    H32Network& target,
+    const char* data,
+    std::size_t size,
+    const std::string& path
+) {
+    MemoryInputBuffer buffer(data, data + size);
+    std::istream stream(&buffer);
+    H32Network candidate{};
+    if (!load_h32_from_stream(stream, candidate, path, size))
+        return false;
     target = std::move(candidate);
     return true;
 }
@@ -2103,6 +3119,7 @@ bool load_p2_embedded() {
             kEmbeddedP2Filename
         )) {
         clear_network(g_p2k32);
+        clear_network(g_p2h32);
         clear_network(g_p2pro);
         g_p2_active = P2ActiveKind::P2;
         (void)next_p2_generation();
@@ -2117,6 +3134,7 @@ bool load_p2_embedded() {
             kEmbeddedP2Filename
         )) {
         clear_network(g_p2);
+        clear_network(g_p2h32);
         clear_network(g_p2pro);
         g_p2_active = P2ActiveKind::P2K32;
         (void)next_p2_generation();
@@ -2125,6 +3143,21 @@ bool load_p2_embedded() {
 
     const std::string p2k32_error = g_error;
     if (load_p2_family_from_memory(
+            g_p2h32,
+            mnue_p2_embedded_data,
+            size,
+            kEmbeddedP2Filename
+        )) {
+        clear_network(g_p2);
+        clear_network(g_p2k32);
+        clear_network(g_p2pro);
+        g_p2_active = P2ActiveKind::P2H32;
+        (void)next_p2_generation();
+        return true;
+    }
+
+    const std::string p2h32_error = g_error;
+    if (load_p2_family_from_memory(
             g_p2pro,
             mnue_p2_embedded_data,
             size,
@@ -2132,6 +3165,7 @@ bool load_p2_embedded() {
         )) {
         clear_network(g_p2);
         clear_network(g_p2k32);
+        clear_network(g_p2h32);
         g_p2_active = P2ActiveKind::P2Pro;
         (void)next_p2_generation();
         return true;
@@ -2140,9 +3174,11 @@ bool load_p2_embedded() {
     g_p2_active = P2ActiveKind::None;
     clear_network(g_p2);
     clear_network(g_p2k32);
+    clear_network(g_p2h32);
     clear_network(g_p2pro);
-    g_error = "failed to load embedded MNUE P2/P2-K32/P2Pro: P2: " + p2_error
+    g_error = "failed to load embedded MNUE P2/P2-K32/P2-H32/P2Pro: P2: " + p2_error
         + "; P2-K32: " + p2k32_error
+        + "; P2-H32: " + p2h32_error
         + "; P2Pro: " + g_error;
     return false;
 }
@@ -2160,6 +3196,7 @@ bool p2_embedded_available() noexcept {
 void unload_p2() noexcept {
     clear_network(g_p2);
     clear_network(g_p2k32);
+    clear_network(g_p2h32);
     clear_network(g_p2pro);
     g_p2_active = P2ActiveKind::None;
     (void)next_p2_generation();
@@ -2178,6 +3215,7 @@ bool p2_loaded() noexcept {
     switch (g_p2_active) {
         case P2ActiveKind::P2:    return g_p2.loaded && g_p2.valid();
         case P2ActiveKind::P2K32: return g_p2k32.loaded && g_p2k32.valid();
+        case P2ActiveKind::P2H32: return g_p2h32.loaded && g_p2h32.valid();
         case P2ActiveKind::P2Pro: return g_p2pro.loaded && g_p2pro.valid();
         case P2ActiveKind::None:  return false;
     }
@@ -2192,6 +3230,7 @@ const std::string& p2_path() noexcept {
     switch (g_p2_active) {
         case P2ActiveKind::P2:    return g_p2.path;
         case P2ActiveKind::P2K32: return g_p2k32.path;
+        case P2ActiveKind::P2H32: return g_p2h32.path;
         case P2ActiveKind::P2Pro: return g_p2pro.path;
         case P2ActiveKind::None:  return kEmptyPath;
     }
@@ -2214,6 +3253,9 @@ const std::string& last_error() noexcept {
         case P2ActiveKind::P2K32:
             return g_p2k32.loaded && g_p2k32.valid() && g_p2k32.forward_vnni_safe
                 && g_p2k32.w1_i8.size() == g_p2k32.w1.size();
+        case P2ActiveKind::P2H32:
+            return g_p2h32.loaded && g_p2h32.valid() && g_p2h32.forward_vnni_safe
+                && g_p2h32.w1_i8.size() == g_p2h32.w1.size();
         case P2ActiveKind::P2Pro:
             return g_p2pro.loaded && g_p2pro.valid() && g_p2pro.forward_vnni_safe
                 && g_p2pro.w1_i8.size() == g_p2pro.w1.size();
@@ -2254,6 +3296,7 @@ int p2_input_size() noexcept {
     switch (g_p2_active) {
         case P2ActiveKind::P2:    return P2Layout::InputSize;
         case P2ActiveKind::P2K32: return P2K32Layout::InputSize;
+        case P2ActiveKind::P2H32: return P2H32Layout::InputSize;
         case P2ActiveKind::P2Pro: return P2ProLayout::InputSize;
         case P2ActiveKind::None:  return 0;
     }
@@ -2264,6 +3307,7 @@ int p2_hidden_size() noexcept {
     switch (g_p2_active) {
         case P2ActiveKind::P2:    return P2Layout::HiddenSize;
         case P2ActiveKind::P2K32: return P2K32Layout::HiddenSize;
+        case P2ActiveKind::P2H32: return P2H32Layout::HiddenSize;
         case P2ActiveKind::P2Pro: return P2ProLayout::HiddenSize;
         case P2ActiveKind::None:  return 0;
     }
@@ -2274,6 +3318,7 @@ int p2_input_buckets() noexcept {
     switch (g_p2_active) {
         case P2ActiveKind::P2:    return P2Layout::InputBuckets;
         case P2ActiveKind::P2K32: return P2K32Layout::InputBuckets;
+        case P2ActiveKind::P2H32: return P2H32Layout::InputBuckets;
         case P2ActiveKind::P2Pro: return P2ProLayout::InputBuckets;
         case P2ActiveKind::None:  return 0;
     }
@@ -2284,6 +3329,7 @@ int p2_output_buckets() noexcept {
     switch (g_p2_active) {
         case P2ActiveKind::P2:    return P2Layout::OutputBuckets;
         case P2ActiveKind::P2K32: return P2K32Layout::OutputBuckets;
+        case P2ActiveKind::P2H32: return P2H32Layout::OutputBuckets;
         case P2ActiveKind::P2Pro: return P2ProLayout::OutputBuckets;
         case P2ActiveKind::None:  return 0;
     }
@@ -2296,6 +3342,8 @@ std::size_t p2_file_bytes() noexcept {
             return static_cast<std::size_t>(file_bytes<P2Layout>());
         case P2ActiveKind::P2K32:
             return static_cast<std::size_t>(file_bytes<P2K32Layout>());
+        case P2ActiveKind::P2H32:
+            return static_cast<std::size_t>(h32_file_bytes());
         case P2ActiveKind::P2Pro:
             return static_cast<std::size_t>(file_bytes<P2ProLayout>());
         case P2ActiveKind::None:
@@ -2345,6 +3393,19 @@ int eval_p2(const Position& pos, P2AccumulatorStack& stack) noexcept {
             const auto& nstm_acc = stm == WHITE ? black_acc : white_acc;
             return forward<P2K32Layout>(pos, g_p2k32, stm_acc, nstm_acc);
         }
+        case P2ActiveKind::P2H32: {
+            if (!g_p2h32.loaded || !g_p2h32.valid())
+                return 0;
+            const auto& white_acc = stack.impl_->ensure_p2h32(pos, WHITE);
+            const auto& black_acc = stack.impl_->ensure_p2h32(pos, BLACK);
+            const Color stm = static_cast<Color>(pos.side_to_move);
+            return forward_h32(
+                pos,
+                g_p2h32,
+                stm == WHITE ? white_acc : black_acc,
+                stm == WHITE ? black_acc : white_acc
+            );
+        }
         case P2ActiveKind::P2Pro: {
             if (!g_p2pro.loaded || !g_p2pro.valid())
                 return 0;
@@ -2390,6 +3451,21 @@ int debug_eval_p2_reference(const Position& pos) noexcept {
             const auto& nstm_acc = stm == WHITE ? black_acc : white_acc;
             return forward_reference<P2K32Layout>(pos, g_p2k32, stm_acc, nstm_acc);
         }
+        case P2ActiveKind::P2H32: {
+            if (!g_p2h32.loaded || !g_p2h32.valid())
+                return 0;
+            H32Accumulator white_acc{};
+            H32Accumulator black_acc{};
+            rebuild_h32_accumulator(pos, WHITE, white_acc, g_p2h32);
+            rebuild_h32_accumulator(pos, BLACK, black_acc, g_p2h32);
+            const Color stm = static_cast<Color>(pos.side_to_move);
+            return forward_h32_reference(
+                pos,
+                g_p2h32,
+                stm == WHITE ? white_acc : black_acc,
+                stm == WHITE ? black_acc : white_acc
+            );
+        }
         case P2ActiveKind::P2Pro: {
             if (!g_p2pro.loaded || !g_p2pro.valid())
                 return 0;
@@ -2416,6 +3492,8 @@ bool p2_i32_forward_enabled() noexcept {
             return g_p2.loaded && g_p2.valid() && g_p2.forward_i32_safe;
         case P2ActiveKind::P2K32:
             return g_p2k32.loaded && g_p2k32.valid() && g_p2k32.forward_i32_safe;
+        case P2ActiveKind::P2H32:
+            return g_p2h32.loaded && g_p2h32.valid() && g_p2h32.forward_i32_safe;
         case P2ActiveKind::P2Pro:
             return g_p2pro.loaded && g_p2pro.valid() && g_p2pro.forward_i32_safe;
         case P2ActiveKind::None:
@@ -2433,6 +3511,8 @@ int p2_w1_max_abs() noexcept {
             return g_p2.loaded && g_p2.valid() ? g_p2.w1_max_abs : 0;
         case P2ActiveKind::P2K32:
             return g_p2k32.loaded && g_p2k32.valid() ? g_p2k32.w1_max_abs : 0;
+        case P2ActiveKind::P2H32:
+            return g_p2h32.loaded && g_p2h32.valid() ? g_p2h32.w1_max_abs : 0;
         case P2ActiveKind::P2Pro:
             return g_p2pro.loaded && g_p2pro.valid() ? g_p2pro.w1_max_abs : 0;
         case P2ActiveKind::None:
@@ -2508,6 +3588,53 @@ void debug_dump_p2_features_impl(
     }
 }
 
+void debug_dump_h32_features(const Position& pos, std::ostream& out) {
+    out << "mnue debug p2-h32\n";
+    out << "side_to_move " << pos.side_to_move << '\n';
+    out << "hidden_size " << P2H32Layout::HiddenSize << '\n';
+    out << "output_bucket " << h32_output_bucket(pos) << '\n';
+    out << "p2_loaded " << (g_p2h32.loaded && g_p2h32.valid() ? 1 : 0) << '\n';
+    if (g_p2h32.loaded && g_p2h32.valid())
+        out << "p2_eval_raw " << eval_p2(pos) << '\n';
+
+    for (int persp = WHITE; persp <= BLACK; ++persp) {
+        const Color perspective = static_cast<Color>(persp);
+        const H32Perspective transform = h32_perspective(pos, perspective);
+        out << "perspective " << persp
+            << " coarse_bucket " << transform.coarse_bucket
+            << " fine_bucket " << transform.fine_bucket
+            << " mirror " << (transform.mirror ? 1 : 0)
+            << '\n';
+        Bitboard bb = pieces(pos);
+        while (bb) {
+            const Square sq = static_cast<Square>(
+                std::countr_zero(static_cast<std::uint64_t>(bb))
+            );
+            bb &= bb - 1;
+            const Piece pc = piece_on(pos, sq);
+            const int coarse = h32_coarse_feature_index(
+                perspective,
+                transform,
+                pc,
+                sq
+            );
+            const int fine = h32_fine_feature_index(
+                perspective,
+                transform,
+                pc,
+                sq
+            );
+            if (coarse < 0 && fine < 0)
+                continue;
+            out << "  feature sq " << static_cast<int>(sq)
+                << " piece " << static_cast<int>(pc)
+                << " coarse " << coarse
+                << " fine " << fine
+                << '\n';
+        }
+    }
+}
+
 void debug_dump_p2_features(const Position& pos, std::ostream& out) {
     switch (g_p2_active) {
         case P2ActiveKind::P2:
@@ -2515,6 +3642,9 @@ void debug_dump_p2_features(const Position& pos, std::ostream& out) {
             return;
         case P2ActiveKind::P2K32:
             debug_dump_p2_features_impl<P2K32Layout>(pos, g_p2k32, "p2-k32", out);
+            return;
+        case P2ActiveKind::P2H32:
+            debug_dump_h32_features(pos, out);
             return;
         case P2ActiveKind::P2Pro:
             debug_dump_p2_features_impl<P2ProLayout>(pos, g_p2pro, "p2pro", out);
@@ -2596,6 +3726,61 @@ bool debug_check_p2_incremental_impl(
     return ok;
 }
 
+bool debug_check_h32_incremental_impl(
+    const Position& pos,
+    H32StackStateSet& set,
+    std::ostream& out
+) noexcept {
+    if (!g_p2h32.loaded || !g_p2h32.valid()) {
+        out << "mnuecheck p2-h32 loaded 0\n";
+        return false;
+    }
+    const u32 generation = g_p2_generation.load(std::memory_order_acquire);
+    set.sync_generation(generation);
+    const std::size_t current = set.state_count - 1;
+    const auto& white = set.ensure(pos, WHITE, g_p2h32, generation);
+    const auto& black = set.ensure(pos, BLACK, g_p2h32, generation);
+    const Color stm = static_cast<Color>(pos.side_to_move);
+    const int incremental = forward_h32(
+        pos,
+        g_p2h32,
+        stm == WHITE ? white : black,
+        stm == WHITE ? black : white
+    );
+
+    H32Accumulator white_rebuild{};
+    H32Accumulator black_rebuild{};
+    rebuild_h32_accumulator(pos, WHITE, white_rebuild, g_p2h32);
+    rebuild_h32_accumulator(pos, BLACK, black_rebuild, g_p2h32);
+    const int rebuilt = forward_h32(
+        pos,
+        g_p2h32,
+        stm == WHITE ? white_rebuild : black_rebuild,
+        stm == WHITE ? black_rebuild : white_rebuild
+    );
+    const bool white_equal = std::equal(
+        set.states[current].accumulation[WHITE].begin(),
+        set.states[current].accumulation[WHITE].end(),
+        white_rebuild.begin()
+    );
+    const bool black_equal = std::equal(
+        set.states[current].accumulation[BLACK].begin(),
+        set.states[current].accumulation[BLACK].end(),
+        black_rebuild.begin()
+    );
+    const bool ok = incremental == rebuilt && white_equal && black_equal;
+    out << "mnuecheck p2-h32 loaded 1"
+        << " stack_size " << set.state_count
+        << " incremental " << incremental
+        << " rebuild " << rebuilt
+        << " score_equal " << (incremental == rebuilt ? 1 : 0)
+        << " white_acc_equal " << (white_equal ? 1 : 0)
+        << " black_acc_equal " << (black_equal ? 1 : 0)
+        << " ok " << (ok ? 1 : 0)
+        << '\n';
+    return ok;
+}
+
 bool debug_check_p2_incremental(
     const Position& pos,
     P2AccumulatorStack& stack,
@@ -2616,6 +3801,12 @@ bool debug_check_p2_incremental(
                 stack.impl_->p2k32_state(),
                 g_p2k32,
                 "p2-k32",
+                out
+            );
+        case P2ActiveKind::P2H32:
+            return debug_check_h32_incremental_impl(
+                pos,
+                stack.impl_->p2h32_state(),
                 out
             );
         case P2ActiveKind::P2Pro:

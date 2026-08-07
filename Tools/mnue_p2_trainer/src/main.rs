@@ -4,6 +4,7 @@ Generic MNUE-P2 trainer for MagnusChess.
 Supported architectures:
     p2      = 1 x 32 x 16 x 1024 x 10240
     p2-k32  = 1 x 64 x 32 x 1024 x 20480
+    p2-h32  = 1 x 64 x (768 coarse + 256 fine) hybrid
 
 Meaning:
     output buckets     = phase_bucket2 x stm_king_bucket
@@ -29,6 +30,8 @@ Output:
 
 The .mnue files are headered for the MagnusChess MNUE loader.
 */
+
+mod h32;
 
 use std::{
     env, fmt, fs,
@@ -72,6 +75,7 @@ const DEFAULT_NET_DIR: &str = "nets/mnue";
 
 const DEFAULT_P2_NAME: &str = "mnue_p2_medium";
 const DEFAULT_P2K32_NAME: &str = "mnue_p2k32";
+const DEFAULT_P2H32_NAME: &str = "mnue_p2h32";
 const DEFAULT_POSITIONS: u128 = 40_003_174_400;
 const DEFAULT_BATCH_SIZE: usize = 16_384;
 const DEFAULT_THREADS: usize = 4;
@@ -79,6 +83,8 @@ const DEFAULT_SUPERBATCHES: usize = 400;
 const DEFAULT_LR: f32 = 0.001;
 const DEFAULT_LR_FINAL: f32 = 0.0000625;
 const DEFAULT_L0_INIT_SCALE: f32 = 1.0;
+const DEFAULT_H32_COARSE_INIT_SCALE: f32 = 0.25;
+const DEFAULT_H32_FINE_INIT_SCALE: f32 = 0.125;
 const DEFAULT_SAVE_RATE: usize = 1;
 const BATCH_QUEUE_SIZE: usize = 64;
 const BINPACK_BUFFER_MB: usize = 256;
@@ -94,6 +100,7 @@ enum Arch {
     #[default]
     P2,
     P2K32,
+    P2H32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -135,6 +142,10 @@ struct RunManifest {
     learning_rate: f32,
     final_learning_rate: f32,
     l0_init_scale: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fine_init_scale: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    feature_mapping: Option<String>,
     superbatches: usize,
     positions_per_superbatch: u64,
 }
@@ -144,6 +155,7 @@ impl Arch {
         match self {
             Self::P2 => DEFAULT_P2_NAME,
             Self::P2K32 => DEFAULT_P2K32_NAME,
+            Self::P2H32 => DEFAULT_P2H32_NAME,
         }
     }
 
@@ -151,6 +163,7 @@ impl Arch {
         match self {
             Self::P2 => "p2",
             Self::P2K32 => "p2-k32",
+            Self::P2H32 => "p2-h32",
         }
     }
 }
@@ -249,6 +262,7 @@ struct Config {
     lr: f32,
     lr_final: f32,
     l0_init_scale: f32,
+    fine_init_scale: f32,
     save_rate: usize,
     resume_from: Option<String>,
     start_superbatch: usize,
@@ -282,7 +296,8 @@ impl Config {
         let mut superbatches = DEFAULT_SUPERBATCHES;
         let mut lr = DEFAULT_LR;
         let mut lr_final = DEFAULT_LR_FINAL;
-        let mut l0_init_scale = DEFAULT_L0_INIT_SCALE;
+        let mut l0_init_scale = None;
+        let mut fine_init_scale = DEFAULT_H32_FINE_INIT_SCALE;
         let mut save_rate = DEFAULT_SAVE_RATE;
         let mut resume_from = None;
         let mut start_superbatch = 1;
@@ -343,7 +358,8 @@ impl Config {
                 "superbatches" => superbatches = parse_usize(key, &value),
                 "lr" => lr = parse_f32(key, &value),
                 "lr-final" => lr_final = parse_f32(key, &value),
-                "l0-init-scale" => l0_init_scale = parse_f32(key, &value),
+                "l0-init-scale" => l0_init_scale = Some(parse_f32(key, &value)),
+                "fine-init-scale" => fine_init_scale = parse_f32(key, &value),
                 "save-rate" | "save-sb" => save_rate = parse_usize(key, &value),
                 "resume-from" => resume_from = Some(parse_path_arg(key, &value)),
                 "start-superbatch" => start_superbatch = parse_usize(key, &value),
@@ -363,7 +379,13 @@ impl Config {
         require_nonzero_usize("start-superbatch", start_superbatch);
         require_positive_f32("lr", lr);
         require_positive_f32("lr-final", lr_final);
+        let l0_init_scale = l0_init_scale.unwrap_or(if arch == Arch::P2H32 {
+            DEFAULT_H32_COARSE_INIT_SCALE
+        } else {
+            DEFAULT_L0_INIT_SCALE
+        });
         require_positive_f32("l0-init-scale", l0_init_scale);
+        require_positive_f32("fine-init-scale", fine_init_scale);
 
         if deprecated_resample_alias {
             if shuffle_mode.is_some_and(|mode| mode != ShuffleMode::Interleaved) {
@@ -406,6 +428,7 @@ impl Config {
             lr,
             lr_final,
             l0_init_scale,
+            fine_init_scale,
             save_rate,
             resume_from,
             start_superbatch,
@@ -492,6 +515,9 @@ impl Config {
         println!("LR                     : {}", self.lr);
         println!("LR final               : {}", self.lr_final);
         println!("L0 init scale          : {}", self.l0_init_scale);
+        if self.arch == Arch::P2H32 {
+            println!("Fine init scale        : {}", self.fine_init_scale);
+        }
         println!("Save every superbatches: {}", self.save_rate);
     }
 }
@@ -501,14 +527,14 @@ fn print_usage() {
         "Usage: cargo run --manifest-path Tools/mnue_p2_trainer/Cargo.toml --release --features cuda -- [options]\n\
          \n\
          Options:\n\
-           --arch p2|p2-k32           Network architecture. Default: p2\n\
+           --arch p2|p2-k32|p2-h32   Network architecture. Default: p2\n\
            --name NAME                 Net id and default output directory name.\n\
            --data PATH                 Required unless --data-dir is used. Training .data or .binpack path; repeatable.\n\
            --data-dir DIR              Required unless --data is used. Directory of .binpack chunks; repeatable.\n\
            --chunk-shuffle-seed N      Virtual chunk shuffle seed. Default: {DEFAULT_CHUNK_SHUFFLE_SEED}\n\
            --chunk-virtual-epochs N    Number of virtual chunk schedule passes. Default: {DEFAULT_CHUNK_VIRTUAL_EPOCHS}\n\
            --chunk-sample N            Chunks sampled without replacement per virtual pass. Default: all\n\
-           --shuffle-mode MODE         dataset|interleaved|sequential. Fresh normal p2 default: dataset\n\
+           --shuffle-mode MODE         dataset|interleaved|sequential. Fresh p2/p2-h32 binpack default: dataset\n\
            --shuffle-cache-dir PATH    Dataset cache path. Default: single DATA_DIR/.mnue-p2-shuffle-cache\n\
            --chunk-resample-on-exhaustion  Deprecated alias for --shuffle-mode interleaved.\n\
            --positions N               Total training positions. Default: {DEFAULT_POSITIONS}\n\
@@ -518,6 +544,7 @@ fn print_usage() {
            --lr X                      Initial learning rate. Default: {DEFAULT_LR}\n\
            --lr-final X                Final exponential-decay learning rate. Default: {DEFAULT_LR_FINAL}\n\
            --l0-init-scale X           Multiplier for l0 weight init stdev. Default: {DEFAULT_L0_INIT_SCALE}\n\
+           --fine-init-scale X         H32 fine-branch init multiplier. Default: {DEFAULT_H32_FINE_INIT_SCALE}\n\
            --save-sb N                 Save one checkpoint every N superbatches. Default: {DEFAULT_SAVE_RATE}\n\
            --save-rate N               Alias for --save-sb.\n\
            --resume-from PATH          Load optimiser state from a saved checkpoint directory.\n\
@@ -531,7 +558,8 @@ fn parse_arch(value: &str) -> Arch {
     match value.trim().to_ascii_lowercase().as_str() {
         "p2" => Arch::P2,
         "p2-k32" | "p2k32" | "k32" => Arch::P2K32,
-        _ => die("--arch must be p2 or p2-k32"),
+        "p2-h32" | "p2h32" | "h32" => Arch::P2H32,
+        _ => die("--arch must be p2, p2-k32, or p2-h32"),
     }
 }
 
@@ -662,6 +690,8 @@ impl RunManifest {
             learning_rate: config.lr,
             final_learning_rate: config.lr_final,
             l0_init_scale: config.l0_init_scale,
+            fine_init_scale: (config.arch == Arch::P2H32).then_some(config.fine_init_scale),
+            feature_mapping: (config.arch == Arch::P2H32).then(|| h32::FEATURE_MAPPING.to_string()),
             superbatches: config.superbatches,
             positions_per_superbatch,
         }
@@ -706,6 +736,13 @@ impl RunManifest {
                 self.l0_init_scale, current.l0_init_scale
             ));
         }
+        if self.fine_init_scale.map(f32::to_bits) != current.fine_init_scale.map(f32::to_bits) {
+            return Err(format!(
+                "run manifest mismatch for fine_init_scale: checkpoint has {:?}, current run has {:?}",
+                self.fine_init_scale, current.fine_init_scale
+            ));
+        }
+        check!(feature_mapping);
         check!(superbatches);
         check!(positions_per_superbatch);
         Ok(())
@@ -745,7 +782,9 @@ fn resolve_shuffle_mode(
             }
         }
     } else {
-        let default = if config.arch == Arch::P2 && data_schedule.kind == InputDataKind::SfBinpack {
+        let default = if matches!(config.arch, Arch::P2 | Arch::P2H32)
+            && data_schedule.kind == InputDataKind::SfBinpack
+        {
             ShuffleMode::Dataset
         } else {
             ShuffleMode::Sequential
@@ -758,10 +797,8 @@ fn resolve_shuffle_mode(
             "direct BulletFormat .data input only supports --shuffle-mode sequential".into(),
         );
     }
-    if config.arch != Arch::P2 && mode == ShuffleMode::Dataset {
-        return Err(
-            "--shuffle-mode dataset is currently supported only by normal --arch p2".into(),
-        );
+    if !matches!(config.arch, Arch::P2 | Arch::P2H32) && mode == ShuffleMode::Dataset {
+        return Err("--shuffle-mode dataset is supported by --arch p2 and --arch p2-h32".into());
     }
     if mode == ShuffleMode::Dataset && config.chunk_sample.is_some() {
         return Err(
@@ -1114,6 +1151,7 @@ fn main() {
     match config.arch {
         Arch::P2 => run_training::<P2Spec16>(config),
         Arch::P2K32 => run_training::<P2K32Spec>(config),
+        Arch::P2H32 => h32::run(config),
     }
 }
 
@@ -1412,6 +1450,7 @@ mod tests {
             lr: 0.001,
             lr_final: 0.0001,
             l0_init_scale: 1.0,
+            fine_init_scale: DEFAULT_H32_FINE_INIT_SCALE,
             save_rate: 1,
             resume_from: None,
             start_superbatch: 1,
@@ -1446,6 +1485,31 @@ mod tests {
         assert_eq!(
             resolve_shuffle_mode(&current, &binpack_schedule(), None).unwrap(),
             (ShuffleMode::Sequential, false)
+        );
+        current.arch = Arch::P2H32;
+        assert_eq!(
+            resolve_shuffle_mode(&current, &binpack_schedule(), None).unwrap(),
+            (ShuffleMode::Dataset, false)
+        );
+    }
+
+    #[test]
+    fn h32_cli_uses_arch_specific_initialisation_defaults() {
+        let current =
+            Config::from_arg_iter(["--arch", "h32", "--data", "test.data", "--positions", "100"]);
+        assert_eq!(current.arch, Arch::P2H32);
+        assert_eq!(current.name, DEFAULT_P2H32_NAME);
+        assert_eq!(current.l0_init_scale.to_bits(), 0.25_f32.to_bits());
+        assert_eq!(current.fine_init_scale.to_bits(), 0.125_f32.to_bits());
+        let manifest =
+            RunManifest::for_run(&current, ShuffleMode::Sequential, "data".to_string(), None);
+        assert_eq!(
+            manifest.feature_mapping.as_deref(),
+            Some(h32::FEATURE_MAPPING)
+        );
+        assert_eq!(
+            manifest.fine_init_scale.map(f32::to_bits),
+            Some(0.125_f32.to_bits())
         );
     }
 

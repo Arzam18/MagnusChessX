@@ -7,10 +7,13 @@ publish = false
 
 [features]
 default = []
-cuda = ["bullet_lib/cuda"]
+cuda = ["bullet_lib/cuda", "bullet-trainer/cuda", "bullet-gpu/cuda"]
 
 [dependencies]
 bullet_lib = { git = "https://github.com/jw1912/bullet", rev = "d372d487aedfeb8bdc256b9f694dbcd41016bf82" }
+bullet-trainer = { git = "https://github.com/jw1912/bullet", rev = "d372d487aedfeb8bdc256b9f694dbcd41016bf82" }
+bullet-gpu = { git = "https://github.com/jw1912/bullet", rev = "d372d487aedfeb8bdc256b9f694dbcd41016bf82" }
+bullet-compiler = { git = "https://github.com/jw1912/bullet", rev = "d372d487aedfeb8bdc256b9f694dbcd41016bf82" }
 bulletformat = "1.8.0"
 mnue_binpack_loader = { path = "../mnue_binpack_loader" }
 mnue_data_schedule = { path = "../mnue_data_schedule" }
