@@ -49,11 +49,15 @@ use bullet_lib::{
     value::{ValueTrainerBuilder, loader},
 };
 use bulletformat::ChessBoard;
-use mnue_binpack_loader::{ResamplingSfBinpackLoader, StartPositionDataLoader};
+use mnue_binpack_loader::{
+    DatasetCache, DatasetShuffleLoader, ResamplingSfBinpackLoader, StartPositionDataLoader,
+    ensure_dataset_cache, fingerprint_sources,
+};
 use mnue_data_schedule::{
     DEFAULT_CHUNK_SHUFFLE_SEED, DEFAULT_CHUNK_VIRTUAL_EPOCHS, DataSchedule, DataScheduleOptions,
     InputDataKind, build_data_schedule, input_data_kind_name, print_startup_log,
 };
+use serde::{Deserialize, Serialize};
 
 const RELATIVE_COLORS: usize = 2;
 const NON_KING_PIECES: usize = 5;
@@ -78,15 +82,61 @@ const DEFAULT_L0_INIT_SCALE: f32 = 1.0;
 const DEFAULT_SAVE_RATE: usize = 1;
 const BATCH_QUEUE_SIZE: usize = 64;
 const BINPACK_BUFFER_MB: usize = 256;
+const RUN_MANIFEST_VERSION: u32 = 1;
+const RUN_MANIFEST_FILE: &str = "run_manifest.toml";
 
 const MNUE_MAGIC: u32 = 0x45554E4D; // file bytes: "MNUE"
 const MNUE_VERSION: u32 = 1;
 const MNUE_ARCH_P2: u32 = 2;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum Arch {
+    #[default]
     P2,
     P2K32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ShuffleMode {
+    Dataset,
+    Interleaved,
+    Sequential,
+}
+
+impl ShuffleMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "dataset" => Ok(Self::Dataset),
+            "interleaved" => Ok(Self::Interleaved),
+            "sequential" => Ok(Self::Sequential),
+            _ => Err("--shuffle-mode must be dataset, interleaved, or sequential".to_string()),
+        }
+    }
+
+    fn cli_name(self) -> &'static str {
+        match self {
+            Self::Dataset => "dataset",
+            Self::Interleaved => "interleaved",
+            Self::Sequential => "sequential",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct RunManifest {
+    version: u32,
+    name: String,
+    architecture: String,
+    shuffle_mode: ShuffleMode,
+    data_fingerprint: String,
+    cache_fingerprint: Option<String>,
+    seed: u64,
+    learning_rate: f32,
+    final_learning_rate: f32,
+    l0_init_scale: f32,
+    superbatches: usize,
+    positions_per_superbatch: u64,
 }
 
 impl Arch {
@@ -102,12 +152,6 @@ impl Arch {
             Self::P2 => "p2",
             Self::P2K32 => "p2-k32",
         }
-    }
-}
-
-impl Default for Arch {
-    fn default() -> Self {
-        Self::P2
     }
 }
 
@@ -196,7 +240,8 @@ struct Config {
     chunk_shuffle_seed: u64,
     chunk_virtual_epochs: usize,
     chunk_sample: Option<usize>,
-    chunk_resample_on_exhaustion: bool,
+    shuffle_mode: Option<ShuffleMode>,
+    shuffle_cache_dir: Option<String>,
     positions: u128,
     batch_size: usize,
     threads: usize,
@@ -213,6 +258,14 @@ struct Config {
 
 impl Config {
     fn from_args() -> Self {
+        Self::from_arg_iter(env::args().skip(1))
+    }
+
+    fn from_arg_iter<I, S>(args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         let mut arch = Arch::default();
         let mut name: Option<String> = None;
         let mut data = Vec::new();
@@ -220,7 +273,9 @@ impl Config {
         let mut chunk_shuffle_seed = DEFAULT_CHUNK_SHUFFLE_SEED;
         let mut chunk_virtual_epochs = DEFAULT_CHUNK_VIRTUAL_EPOCHS;
         let mut chunk_sample = None;
-        let mut chunk_resample_on_exhaustion = false;
+        let mut shuffle_mode = None;
+        let mut shuffle_cache_dir = None;
+        let mut deprecated_resample_alias = false;
         let mut positions = DEFAULT_POSITIONS;
         let mut batch_size = DEFAULT_BATCH_SIZE;
         let mut threads = DEFAULT_THREADS;
@@ -234,7 +289,7 @@ impl Config {
         let mut output_dir = None;
         let mut net_dir = DEFAULT_NET_DIR.to_string();
 
-        let args = env::args().skip(1).collect::<Vec<_>>();
+        let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
         let mut idx = 0;
 
         while idx < args.len() {
@@ -250,7 +305,7 @@ impl Config {
             };
 
             if key_value == "chunk-resample-on-exhaustion" {
-                chunk_resample_on_exhaustion = true;
+                deprecated_resample_alias = true;
                 idx += 1;
                 continue;
             }
@@ -275,6 +330,13 @@ impl Config {
                 "chunk-shuffle-seed" => chunk_shuffle_seed = parse_u64(key, &value),
                 "chunk-virtual-epochs" => chunk_virtual_epochs = parse_usize(key, &value),
                 "chunk-sample" => chunk_sample = Some(parse_usize(key, &value)),
+                "shuffle-mode" => {
+                    shuffle_mode =
+                        Some(ShuffleMode::parse(&value).unwrap_or_else(|error| die(error)))
+                }
+                "shuffle-cache-dir" => {
+                    shuffle_cache_dir = Some(parse_path_arg(key, &value));
+                }
                 "positions" => positions = parse_u128(key, &value),
                 "batch-size" => batch_size = parse_usize(key, &value),
                 "threads" => threads = parse_usize(key, &value),
@@ -303,6 +365,18 @@ impl Config {
         require_positive_f32("lr-final", lr_final);
         require_positive_f32("l0-init-scale", l0_init_scale);
 
+        if deprecated_resample_alias {
+            if shuffle_mode.is_some_and(|mode| mode != ShuffleMode::Interleaved) {
+                die(
+                    "--chunk-resample-on-exhaustion conflicts with --shuffle-mode; the deprecated flag means --shuffle-mode interleaved",
+                );
+            }
+            shuffle_mode = Some(ShuffleMode::Interleaved);
+            eprintln!(
+                "warning: --chunk-resample-on-exhaustion is deprecated; use --shuffle-mode interleaved"
+            );
+        }
+
         if start_superbatch > superbatches {
             die("--start-superbatch must not exceed --superbatches");
         }
@@ -323,7 +397,8 @@ impl Config {
             chunk_shuffle_seed,
             chunk_virtual_epochs,
             chunk_sample,
-            chunk_resample_on_exhaustion,
+            shuffle_mode,
+            shuffle_cache_dir,
             positions,
             batch_size,
             threads,
@@ -372,20 +447,31 @@ impl Config {
             chunk_shuffle_seed: self.chunk_shuffle_seed,
             chunk_virtual_epochs: self.chunk_virtual_epochs,
             chunk_sample: self.chunk_sample,
-            chunk_resample_on_exhaustion: self.chunk_resample_on_exhaustion,
+            chunk_resample_on_exhaustion: false,
         }
     }
 
-    fn print_summary<S: P2Spec>(&self, data_schedule: &DataSchedule) {
+    fn print_summary<S: P2Spec>(
+        &self,
+        data_schedule: &DataSchedule,
+        shuffle_mode: ShuffleMode,
+        dataset_cache: Option<&DatasetCache>,
+    ) {
         println!("MNUE-P2 generic run");
         println!("Architecture           : {}", self.arch.cli_name());
         println!("Name                   : {}", self.name);
+        println!("Shuffle mode           : {}", shuffle_mode.cli_name());
         println!(
             "Training data format   : {}",
             input_data_kind_name(data_schedule.kind)
         );
         println!("Output dir             : {}", self.output_dir);
         println!("Net dir                : {}", self.net_dir);
+        if let Some(cache) = dataset_cache {
+            println!("Shuffle cache dir      : {}", cache.directory().display());
+            println!("Dataset positions/epoch: {}", cache.total_positions());
+            println!("Data fingerprint       : {}", cache.source_fingerprint());
+        }
         println!("Input buckets          : {}", S::INPUT_BUCKETS);
         println!("Output buckets         : {}", S::OUTPUT_BUCKETS);
         println!("Input size             : {}", S::INPUT_SIZE);
@@ -422,7 +508,9 @@ fn print_usage() {
            --chunk-shuffle-seed N      Virtual chunk shuffle seed. Default: {DEFAULT_CHUNK_SHUFFLE_SEED}\n\
            --chunk-virtual-epochs N    Number of virtual chunk schedule passes. Default: {DEFAULT_CHUNK_VIRTUAL_EPOCHS}\n\
            --chunk-sample N            Chunks sampled without replacement per virtual pass. Default: all\n\
-           --chunk-resample-on-exhaustion  Rebuild a new virtual chunk pool after the current one is exhausted.\n\
+           --shuffle-mode MODE         dataset|interleaved|sequential. Fresh normal p2 default: dataset\n\
+           --shuffle-cache-dir PATH    Dataset cache path. Default: single DATA_DIR/.mnue-p2-shuffle-cache\n\
+           --chunk-resample-on-exhaustion  Deprecated alias for --shuffle-mode interleaved.\n\
            --positions N               Total training positions. Default: {DEFAULT_POSITIONS}\n\
            --batch-size N              Positions per batch. Default: {DEFAULT_BATCH_SIZE}\n\
            --threads N                 CPU data-prep threads. Default: {DEFAULT_THREADS}\n\
@@ -525,8 +613,299 @@ fn validate_resume_output_targets(config: &Config) {
     }
 }
 
+fn validate_fresh_output_root(config: &Config) {
+    if config.resume_from.is_some() {
+        return;
+    }
+    let output_dir = Path::new(&config.output_dir);
+    let Ok(entries) = fs::read_dir(output_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_checkpoint = path.is_dir()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.strip_prefix(&format!("{}-", config.name))
+                        .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
+                });
+        if is_checkpoint {
+            die(format!(
+                "output root already contains checkpoints; resume the run or choose a new --name/--output-dir: {}",
+                path.display()
+            ));
+        }
+    }
+}
+
+impl RunManifest {
+    fn for_run(
+        config: &Config,
+        shuffle_mode: ShuffleMode,
+        data_fingerprint: String,
+        cache_fingerprint: Option<String>,
+    ) -> Self {
+        let positions_per_superbatch =
+            config.batch_size as u128 * config.batches_per_superbatch() as u128;
+        let positions_per_superbatch = u64::try_from(positions_per_superbatch)
+            .unwrap_or_else(|_| die("positions per superbatch exceeds u64"));
+        Self {
+            version: RUN_MANIFEST_VERSION,
+            name: config.name.clone(),
+            architecture: config.arch.cli_name().to_string(),
+            shuffle_mode,
+            data_fingerprint,
+            cache_fingerprint,
+            seed: config.chunk_shuffle_seed,
+            learning_rate: config.lr,
+            final_learning_rate: config.lr_final,
+            l0_init_scale: config.l0_init_scale,
+            superbatches: config.superbatches,
+            positions_per_superbatch,
+        }
+    }
+
+    fn validate_resume(&self, current: &Self) -> Result<(), String> {
+        macro_rules! check {
+            ($field:ident) => {
+                if self.$field != current.$field {
+                    return Err(format!(
+                        "run manifest mismatch for {}: checkpoint has {:?}, current run has {:?}",
+                        stringify!($field),
+                        self.$field,
+                        current.$field
+                    ));
+                }
+            };
+        }
+
+        check!(version);
+        check!(name);
+        check!(architecture);
+        check!(shuffle_mode);
+        check!(data_fingerprint);
+        check!(cache_fingerprint);
+        check!(seed);
+        if self.learning_rate.to_bits() != current.learning_rate.to_bits() {
+            return Err(format!(
+                "run manifest mismatch for learning_rate: checkpoint has {}, current run has {}",
+                self.learning_rate, current.learning_rate
+            ));
+        }
+        if self.final_learning_rate.to_bits() != current.final_learning_rate.to_bits() {
+            return Err(format!(
+                "run manifest mismatch for final_learning_rate: checkpoint has {}, current run has {}",
+                self.final_learning_rate, current.final_learning_rate
+            ));
+        }
+        if self.l0_init_scale.to_bits() != current.l0_init_scale.to_bits() {
+            return Err(format!(
+                "run manifest mismatch for l0_init_scale: checkpoint has {}, current run has {}",
+                self.l0_init_scale, current.l0_init_scale
+            ));
+        }
+        check!(superbatches);
+        check!(positions_per_superbatch);
+        Ok(())
+    }
+}
+
+fn resolve_shuffle_mode(
+    config: &Config,
+    data_schedule: &DataSchedule,
+    resume_manifest: Option<&RunManifest>,
+) -> Result<(ShuffleMode, bool), String> {
+    let (mode, legacy_resume) = if config.resume_from.is_some() {
+        match resume_manifest {
+            Some(manifest) => {
+                if let Some(requested) = config.shuffle_mode {
+                    if requested != manifest.shuffle_mode {
+                        return Err(format!(
+                            "--shuffle-mode {} does not match checkpoint run manifest mode {}",
+                            requested.cli_name(),
+                            manifest.shuffle_mode.cli_name()
+                        ));
+                    }
+                }
+                (manifest.shuffle_mode, false)
+            }
+            None => {
+                if config
+                    .shuffle_mode
+                    .is_some_and(|mode| mode != ShuffleMode::Sequential)
+                {
+                    return Err(
+                        "legacy checkpoint has no run_manifest.toml; start a new run/name to use dataset or interleaved shuffle"
+                            .to_string(),
+                    );
+                }
+                (ShuffleMode::Sequential, true)
+            }
+        }
+    } else {
+        let default = if config.arch == Arch::P2 && data_schedule.kind == InputDataKind::SfBinpack {
+            ShuffleMode::Dataset
+        } else {
+            ShuffleMode::Sequential
+        };
+        (config.shuffle_mode.unwrap_or(default), false)
+    };
+
+    if data_schedule.kind == InputDataKind::Direct && mode != ShuffleMode::Sequential {
+        return Err(
+            "direct BulletFormat .data input only supports --shuffle-mode sequential".into(),
+        );
+    }
+    if config.arch != Arch::P2 && mode == ShuffleMode::Dataset {
+        return Err(
+            "--shuffle-mode dataset is currently supported only by normal --arch p2".into(),
+        );
+    }
+    if mode == ShuffleMode::Dataset && config.chunk_sample.is_some() {
+        return Err(
+            "--chunk-sample is not supported with --shuffle-mode dataset; every position must appear exactly once per epoch"
+                .into(),
+        );
+    }
+    Ok((mode, legacy_resume))
+}
+
+fn dataset_cache_dir(config: &Config) -> Result<PathBuf, String> {
+    if let Some(path) = &config.shuffle_cache_dir {
+        return Ok(PathBuf::from(path));
+    }
+    if config.data.is_empty() && config.data_dirs.len() == 1 {
+        return Ok(PathBuf::from(&config.data_dirs[0]).join(".mnue-p2-shuffle-cache"));
+    }
+    Err(
+        "--shuffle-cache-dir is required unless dataset input comes from exactly one --data-dir and no explicit --data paths"
+            .into(),
+    )
+}
+
+fn resume_run_manifest(checkpoint: &Path) -> Result<Option<RunManifest>, String> {
+    let root = checkpoint.parent().ok_or_else(|| {
+        format!(
+            "resume checkpoint has no output root parent: {}",
+            checkpoint.display()
+        )
+    })?;
+    let path = root.join(RUN_MANIFEST_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_run_manifest(&path).map(Some)
+}
+
+fn read_run_manifest(path: &Path) -> Result<RunManifest, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read run manifest {}: {error}", path.display()))?;
+    toml::from_str(&text)
+        .map_err(|error| format!("invalid run manifest {}: {error}", path.display()))
+}
+
+fn install_run_manifest(output_dir: &Path, manifest: &RunManifest) -> Result<(), String> {
+    fs::create_dir_all(output_dir).map_err(|error| {
+        format!(
+            "failed to create output directory {}: {error}",
+            output_dir.display()
+        )
+    })?;
+    let target = output_dir.join(RUN_MANIFEST_FILE);
+    if target.exists() {
+        return read_run_manifest(&target)?.validate_resume(manifest);
+    }
+
+    let encoded = toml::to_string_pretty(manifest)
+        .map_err(|error| format!("failed to encode run manifest: {error}"))?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = output_dir.join(format!(
+        ".{RUN_MANIFEST_FILE}.tmp-{}-{nonce}",
+        process::id()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| {
+            format!(
+                "failed to create temporary run manifest {}: {error}",
+                temporary.display()
+            )
+        })?;
+    let write_result = file
+        .write_all(encoded.as_bytes())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "failed to atomically write run manifest {}: {error}",
+            target.display()
+        ));
+    }
+    if let Err(error) = fs::rename(&temporary, &target) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "failed to atomically install run manifest {}: {error}",
+            target.display()
+        ));
+    }
+    Ok(())
+}
+
 fn accept_all_binpack(_: &loader::sfbinpack::TrainingDataEntry) -> bool {
     true
+}
+
+fn metadata_data_fingerprint(paths: &[PathBuf]) -> Result<String, String> {
+    let mut entries = paths
+        .iter()
+        .map(|path| {
+            let canonical = fs::canonicalize(path).map_err(|error| {
+                format!(
+                    "failed to canonicalise training data {}: {error}",
+                    path.display()
+                )
+            })?;
+            let metadata = fs::metadata(&canonical).map_err(|error| {
+                format!(
+                    "failed to read training data metadata {}: {error}",
+                    canonical.display()
+                )
+            })?;
+            let modified_ns = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            Ok((
+                canonical.to_string_lossy().into_owned(),
+                metadata.len(),
+                modified_ns,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    entries.sort_by_key(|entry| entry.0.to_ascii_lowercase());
+
+    let mut identity = String::from("metadata-v1");
+    for (path, size, modified_ns) in entries {
+        identity.push('\n');
+        identity.push_str(&path.len().to_string());
+        identity.push(':');
+        identity.push_str(&path);
+        identity.push(':');
+        identity.push_str(&size.to_string());
+        identity.push(':');
+        identity.push_str(&modified_ns.to_string());
+    }
+    Ok(identity)
 }
 
 fn parse_usize(key: &str, value: &str) -> usize {
@@ -750,11 +1129,96 @@ fn run_training<S: P2Spec>(config: Config) {
 
     let data_schedule = build_data_schedule(config.data_schedule_options())
         .unwrap_or_else(|error| die(error.to_string()));
+    let resume_manifest = if let Some(path) = &config.resume_from {
+        resume_run_manifest(Path::new(path)).unwrap_or_else(|error| die(error))
+    } else {
+        None
+    };
+    let (shuffle_mode, legacy_resume) =
+        resolve_shuffle_mode(&config, &data_schedule, resume_manifest.as_ref())
+            .unwrap_or_else(|error| die(error));
+    if legacy_resume {
+        eprintln!(
+            "warning: resume checkpoint has no {RUN_MANIFEST_FILE}; using legacy sequential data order and not creating a dataset cache"
+        );
+    }
     if let Some(path) = &config.resume_from {
         validate_resume_checkpoint(Path::new(path), config.start_superbatch);
     }
     validate_resume_output_targets(&config);
-    config.print_summary::<S>(&data_schedule);
+    validate_fresh_output_root(&config);
+
+    if let Some(manifest) = &resume_manifest {
+        let provisional = RunManifest::for_run(
+            &config,
+            shuffle_mode,
+            manifest.data_fingerprint.clone(),
+            manifest.cache_fingerprint.clone(),
+        );
+        manifest
+            .validate_resume(&provisional)
+            .unwrap_or_else(|error| die(error));
+        if shuffle_mode == ShuffleMode::Dataset {
+            let fingerprint =
+                fingerprint_sources(&data_schedule.chunk_paths).unwrap_or_else(|error| {
+                    die(format!("failed to fingerprint training data: {error}"))
+                });
+            if fingerprint != manifest.data_fingerprint {
+                die(format!(
+                    "run manifest mismatch for data_fingerprint: checkpoint has {:?}, current data has {:?}",
+                    manifest.data_fingerprint, fingerprint
+                ));
+            }
+        }
+    }
+
+    let dataset_cache = if shuffle_mode == ShuffleMode::Dataset {
+        let cache_dir = dataset_cache_dir(&config).unwrap_or_else(|error| die(error));
+        let cache = ensure_dataset_cache(&data_schedule.chunk_paths, &cache_dir)
+            .unwrap_or_else(|error| die(format!("dataset cache error: {error}")));
+        let available_positions = u128::from(cache.total_positions())
+            .checked_mul(config.chunk_virtual_epochs as u128)
+            .unwrap_or_else(|| die("dataset virtual epoch capacity overflow"));
+        if config.effective_positions() > available_positions {
+            let required_epochs = config
+                .effective_positions()
+                .div_ceil(u128::from(cache.total_positions()));
+            die(format!(
+                "--chunk-virtual-epochs {} covers {available_positions} positions, but the run needs {}; set it to at least {required_epochs}",
+                config.chunk_virtual_epochs,
+                config.effective_positions()
+            ));
+        }
+        Some(cache)
+    } else {
+        None
+    };
+
+    if !legacy_resume {
+        let fingerprint_paths = if data_schedule.kind == InputDataKind::SfBinpack {
+            &data_schedule.chunk_paths
+        } else {
+            &data_schedule.scheduled_paths
+        };
+        let data_fingerprint = dataset_cache
+            .as_ref()
+            .map(|cache| cache.source_fingerprint().to_string())
+            .unwrap_or_else(|| {
+                metadata_data_fingerprint(fingerprint_paths).unwrap_or_else(|error| die(error))
+            });
+        let cache_fingerprint = dataset_cache.as_ref().map(DatasetCache::cache_fingerprint);
+        let current_manifest =
+            RunManifest::for_run(&config, shuffle_mode, data_fingerprint, cache_fingerprint);
+        if let Some(manifest) = &resume_manifest {
+            manifest
+                .validate_resume(&current_manifest)
+                .unwrap_or_else(|error| die(error));
+        }
+        install_run_manifest(Path::new(&config.output_dir), &current_manifest)
+            .unwrap_or_else(|error| die(error));
+    }
+
+    config.print_summary::<S>(&data_schedule, shuffle_mode, dataset_cache.as_ref());
     print_startup_log(&data_schedule);
 
     fs::create_dir_all(&config.output_dir).expect("failed to create output dir");
@@ -827,7 +1291,18 @@ fn run_training<S: P2Spec>(config: Config) {
             trainer.run(&schedule, &settings, &data_loader);
         }
         InputDataKind::SfBinpack => {
-            if data_schedule.resample_on_exhaustion {
+            if shuffle_mode == ShuffleMode::Dataset {
+                let cache = dataset_cache
+                    .clone()
+                    .expect("dataset shuffle mode must have an initialised cache");
+                let data_loader = DatasetShuffleLoader::new(
+                    cache,
+                    data_schedule.seed,
+                    data_schedule.virtual_epochs,
+                )
+                .unwrap_or_else(|error| die(format!("dataset cache error: {error}")));
+                trainer.run(&schedule, &settings, &data_loader);
+            } else if shuffle_mode == ShuffleMode::Interleaved {
                 let data_loader = StartPositionDataLoader::new(ResamplingSfBinpackLoader::new(
                     data_schedule.chunk_path_strings(),
                     BINPACK_BUFFER_MB,
@@ -913,4 +1388,186 @@ fn write_u32<W: Write>(out: &mut W, x: u32) -> io::Result<()> {
 
 fn write_i32<W: Write>(out: &mut W, x: i32) -> io::Result<()> {
     out.write_all(&x.to_le_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Config {
+        Config {
+            arch: Arch::P2,
+            name: "test-p2".to_string(),
+            data: vec!["test.binpack".to_string()],
+            data_dirs: Vec::new(),
+            chunk_shuffle_seed: 7,
+            chunk_virtual_epochs: 6,
+            chunk_sample: None,
+            shuffle_mode: None,
+            shuffle_cache_dir: Some("cache".to_string()),
+            positions: 100,
+            batch_size: 10,
+            threads: 4,
+            superbatches: 2,
+            lr: 0.001,
+            lr_final: 0.0001,
+            l0_init_scale: 1.0,
+            save_rate: 1,
+            resume_from: None,
+            start_superbatch: 1,
+            output_dir: "runs/test-p2".to_string(),
+            net_dir: "nets/mnue".to_string(),
+        }
+    }
+
+    fn binpack_schedule() -> DataSchedule {
+        DataSchedule {
+            kind: InputDataKind::SfBinpack,
+            chunk_paths: vec![PathBuf::from("test.binpack")],
+            scheduled_paths: vec![PathBuf::from("test.binpack")],
+            explicit_path_count: 1,
+            discovered_chunk_count: 0,
+            unique_chunk_count: 1,
+            seed: 7,
+            virtual_epochs: 6,
+            chunk_sample: None,
+            resample_on_exhaustion: false,
+        }
+    }
+
+    #[test]
+    fn fresh_normal_p2_defaults_to_dataset_but_k32_does_not() {
+        let mut current = config();
+        assert_eq!(
+            resolve_shuffle_mode(&current, &binpack_schedule(), None).unwrap(),
+            (ShuffleMode::Dataset, false)
+        );
+        current.arch = Arch::P2K32;
+        assert_eq!(
+            resolve_shuffle_mode(&current, &binpack_schedule(), None).unwrap(),
+            (ShuffleMode::Sequential, false)
+        );
+    }
+
+    #[test]
+    fn legacy_resume_is_sequential_and_cannot_silently_migrate() {
+        let mut current = config();
+        current.resume_from = Some("runs/test-p2/test-p2-1".to_string());
+        current.start_superbatch = 2;
+        assert_eq!(
+            resolve_shuffle_mode(&current, &binpack_schedule(), None).unwrap(),
+            (ShuffleMode::Sequential, true)
+        );
+        current.shuffle_mode = Some(ShuffleMode::Dataset);
+        assert!(resolve_shuffle_mode(&current, &binpack_schedule(), None).is_err());
+    }
+
+    #[test]
+    fn deprecated_resample_flag_selects_interleaved() {
+        let parsed =
+            Config::from_arg_iter(["--data", "test.binpack", "--chunk-resample-on-exhaustion"]);
+        assert_eq!(parsed.shuffle_mode, Some(ShuffleMode::Interleaved));
+    }
+
+    #[test]
+    fn resume_allows_batch_change_only_when_positions_per_superbatch_matches() {
+        let original = config();
+        let original_manifest = RunManifest::for_run(
+            &original,
+            ShuffleMode::Dataset,
+            "data".to_string(),
+            Some("cache".to_string()),
+        );
+
+        let mut compatible = original.clone();
+        compatible.batch_size = 25;
+        compatible.threads = 12;
+        let compatible_manifest = RunManifest::for_run(
+            &compatible,
+            ShuffleMode::Dataset,
+            "data".to_string(),
+            Some("cache".to_string()),
+        );
+        original_manifest
+            .validate_resume(&compatible_manifest)
+            .unwrap();
+
+        let mut incompatible = original;
+        incompatible.batch_size = 16;
+        let incompatible_manifest = RunManifest::for_run(
+            &incompatible,
+            ShuffleMode::Dataset,
+            "data".to_string(),
+            Some("cache".to_string()),
+        );
+        let error = original_manifest
+            .validate_resume(&incompatible_manifest)
+            .unwrap_err();
+        assert!(error.contains("positions_per_superbatch"));
+    }
+
+    #[test]
+    fn dataset_mode_rejects_chunk_sample_and_ambiguous_default_cache_root() {
+        let mut current = config();
+        current.shuffle_mode = Some(ShuffleMode::Dataset);
+        current.chunk_sample = Some(1);
+        assert!(resolve_shuffle_mode(&current, &binpack_schedule(), None).is_err());
+
+        current.chunk_sample = None;
+        current.shuffle_cache_dir = None;
+        current.data_dirs = vec!["a".to_string(), "b".to_string()];
+        assert!(dataset_cache_dir(&current).is_err());
+    }
+
+    #[test]
+    fn run_manifest_is_written_and_existing_mismatch_is_rejected() {
+        let directory = std::env::temp_dir().join(format!(
+            "mnue-p2-run-manifest-{}-{}",
+            process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let original = RunManifest::for_run(
+            &config(),
+            ShuffleMode::Dataset,
+            "data".to_string(),
+            Some("cache".to_string()),
+        );
+        install_run_manifest(&directory, &original).unwrap();
+        assert_eq!(
+            read_run_manifest(&directory.join(RUN_MANIFEST_FILE)).unwrap(),
+            original
+        );
+
+        let mut changed = original.clone();
+        changed.seed += 1;
+        let error = install_run_manifest(&directory, &changed).unwrap_err();
+        assert!(error.contains("seed"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn direct_data_identity_uses_metadata_without_reading_contents() {
+        let directory = std::env::temp_dir().join(format!(
+            "mnue-p2-data-identity-{}-{}",
+            process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let data = directory.join("train.data");
+        fs::write(&data, [1_u8; 32]).unwrap();
+        let first = metadata_data_fingerprint(std::slice::from_ref(&data)).unwrap();
+        assert!(first.starts_with("metadata-v1\n"));
+        assert!(first.contains(":32:"));
+
+        fs::write(&data, [2_u8; 64]).unwrap();
+        let second = metadata_data_fingerprint(std::slice::from_ref(&data)).unwrap();
+        assert_ne!(first, second);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

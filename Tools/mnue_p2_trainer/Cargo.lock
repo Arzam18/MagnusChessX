@@ -175,7 +175,9 @@ version = "0.1.0"
 dependencies = [
  "bullet_lib",
  "bulletformat",
+ "serde",
  "sfbinpack",
+ "toml",
 ]
 
 [[package]]
@@ -190,6 +192,8 @@ dependencies = [
  "bulletformat",
  "mnue_binpack_loader",
  "mnue_data_schedule",
+ "serde",
+ "toml",
 ]
 
 [[package]]

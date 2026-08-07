@@ -14,3 +14,5 @@ bullet_lib = { git = "https://github.com/jw1912/bullet", rev = "d372d487aedfeb8b
 bulletformat = "1.8.0"
 mnue_binpack_loader = { path = "../mnue_binpack_loader" }
 mnue_data_schedule = { path = "../mnue_data_schedule" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

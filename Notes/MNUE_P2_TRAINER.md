@@ -98,6 +98,26 @@ Example P2-K32 100M / 5-superbatch smoke run:
 cargo run --manifest-path Tools/mnue_p2_trainer/Cargo.toml --release --features cuda -- --arch p2-k32 --name mnue_p2k32_100m_5sb --data <train.data> --positions 100000000 --batch-size 65536 --threads 12 --superbatches 5 --lr 0.001 --lr-final 0.0001 --l0-init-scale 0.25 --save-sb 1
 ```
 
+Fresh normal-P2 `.binpack` runs default to full-dataset shuffle. For the
+165,936,222-position generated dataset, five requested passes round up to
+829,685,760 effective positions with the settings below, so six virtual epochs
+are required to cover the final 4,650 positions:
+
+```powershell
+cargo run --manifest-path Tools/mnue_p2_trainer/Cargo.toml --release --features cuda -- `
+  --arch p2 --name mnue_p2_generated_829m_5x_20sb `
+  --data-dir D:\NNUE\data\Stockfish-tools\generated `
+  --chunk-shuffle-seed 1 --chunk-virtual-epochs 6 `
+  --positions 829681110 --batch-size 32768 --threads 20 --superbatches 20 `
+  --lr 0.001 --lr-final 0.0000625 --l0-init-scale 0.25 --save-sb 1
+```
+
+The first invocation builds
+`D:\NNUE\data\Stockfish-tools\generated\.mnue-p2-shuffle-cache`. It contains
+64 native 32-byte BulletFormat shards (5,309,959,104 bytes for this dataset)
+and a versioned `manifest.toml`. Later runs reuse it when all source SHA-256
+fingerprints still match.
+
 Important parameters:
 
 ```text
@@ -108,6 +128,8 @@ Important parameters:
 --chunk-shuffle-seed N deterministic file and position shuffle seed
 --chunk-virtual-epochs N number of shuffled passes scheduled per pool
 --chunk-sample N     optional number of distinct files selected per virtual epoch
+--shuffle-mode MODE  dataset, interleaved, or sequential
+--shuffle-cache-dir PATH explicit dataset cache path; required for multiple input roots
 --positions N        total training positions
 --batch-size N       positions per GPU batch
 --threads N          CPU data-prep threads
@@ -126,19 +148,34 @@ Important parameters:
 Training input is required. Use either one or more `--data` paths, or one or
 more `--data-dir` directories containing `.binpack` chunks.
 
-For multi-file `.binpack` input, the loader opens the files selected for one
-virtual epoch together and interleaves 16,384-position stripes according to
-each file's compressed-byte progress. This keeps differently sized sources
-spread across the epoch instead of draining one multi-million-position file at
-a time. The 256 MiB position shuffle uses a persistent RNG derived from
-`--chunk-shuffle-seed`, so consecutive buffers do not receive the same
-permutation. Parallel conversion is joined in source order, making the stream
-replayable with the same paths and seed.
+`dataset` mode decodes every sorted source once, validates WDL, and assigns
+each position to one of 64 shards with a fixed hash independent of the training
+seed. Every epoch deterministically reshuffles the shard order and performs a
+separate Fisher-Yates shuffle inside each loaded shard while prefetching the
+next shard. Every position occurs exactly once per epoch. Resume skips complete
+epochs and shards and reconstructs only the current shard, so its suffix is
+position-for-position identical to uninterrupted training. `--chunk-sample`
+is intentionally rejected in this mode.
 
-Checkpoints created by the older sequential-file loader remain loadable, but
-resuming one with the interleaved loader is not a data-stream-equivalent
-continuation. Start a new run name when comparing training quality across this
-loader change.
+`interleaved` retains the previous 16,384-position stripe loader and 256 MiB
+shuffle buffer. The old `--chunk-resample-on-exhaustion` flag still selects
+this mode but prints a deprecation warning. `sequential` retains the native
+legacy Bullet loader. P2-K32 defaults remain unchanged; dataset mode currently
+supports normal P2 only.
+
+Fresh runs write `run_manifest.toml` in the checkpoint root. It pins shuffle
+mode, source/cache fingerprints, seed, architecture, learning-rate schedule,
+superbatch count, and effective positions per superbatch. A new checkpoint
+resume must match it. Threads may change; batch size may change only when
+positions per superbatch remain exactly equal. A checkpoint made before this
+manifest existed automatically uses legacy `sequential` mode, does not build a
+dataset cache, and cannot be switched to dataset mode during resume. Start a
+new run name to adopt the new shuffle.
+
+Direct `.data` files are identified from canonical path, byte size, and file
+modification time. The trainer does not hash or scan the full `.data` file at
+startup. Content SHA-256 remains limited to the binpack dataset-cache builder,
+where it is needed for cache invalidation.
 
 Outputs:
 

@@ -1,4 +1,11 @@
+mod dataset;
+
 use std::{fs::File, sync::mpsc, thread};
+
+pub use dataset::{
+    DATASET_CACHE_RECORD_SIZE, DATASET_CACHE_SHARDS, DatasetCache, DatasetCacheManifest,
+    DatasetShuffleLoader, ensure_dataset_cache, fingerprint_sources, validate_dataset_cache,
+};
 
 use bullet_lib::value::loader::DataLoader;
 use bulletformat::ChessBoard;

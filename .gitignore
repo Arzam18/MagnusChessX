@@ -13,10 +13,12 @@
 .codex/
 .build/
 /build/
+/runs/
 src/build/
 Src/build/
 tools/mnue_p2_trainer/target/
 Tools/mnue_p2_trainer/target/
+Tools/mnue_binpack_loader/target/
 tools/mnue_data_schedule/target/
 Tools/mnue_data_schedule/target/
 Tools/binpack_counter/target/
