@@ -50,7 +50,7 @@ SOFTWARE.
 #include "syzygy/Syzygy.h"
 
 /*
- * MagnusChessX Thinking Search Engine Core
+ * Magnus Algorithm Chess Engine — Kraken Search Core
  *
  * Uses a classic Iterative Deepening + Principal Variation Search (PVS) architecture
  * with the following key components:

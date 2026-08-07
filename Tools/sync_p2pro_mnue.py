@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Convert a Bullet P2Pro quantised.bin into a MagnusChessX Thinking .MNUE file.
+Convert a Bullet P2Pro quantised.bin into a MACE-Kraken-v1 .MNUE file.
 
 Typical use:
     python Tools/sync_p2pro_mnue.py ^
@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
         "--engine-root",
         type=Path,
         default=Path(__file__).resolve().parents[1],
-        help="MagnusChessX Thinking repository root. Default: this script's repository.",
+        help="MACE-Kraken-v1 repository root. Default: this script's repository.",
     )
     parser.add_argument(
         "--output",

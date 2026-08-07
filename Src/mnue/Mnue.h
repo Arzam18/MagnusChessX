@@ -130,7 +130,7 @@ static_assert(P4Layout::InputSize == 20480);
 // Embedded P2/P2-K32/P2Pro network filename - driven by Makefile -D, with a fallback
 // for builds that do not go through the Makefile.
 #ifndef MNUE_EMBEDDED_FILENAME
-#define MNUE_EMBEDDED_FILENAME "magxtk-master-p2h32-s8011M-o3183M-c+frc.mnue"
+#define MNUE_EMBEDDED_FILENAME "mace-kraken-v1-p2h32-s8011M-o3183M-c+frc.mnue"
 #endif
 inline constexpr const char* kEmbeddedP2Filename = MNUE_EMBEDDED_FILENAME;
 

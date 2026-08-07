@@ -1,6 +1,6 @@
 # MNUE-X1 Design Specification
 
-MNUE-X1 is a tactical-feature network design for MagnusChessX Thinking. It is
+MNUE-X1 is a tactical-feature network design for MACE-Kraken-v1. It is
 not a blind widening of the existing P2 hidden layer; it adds information that
 the P2 feature set cannot represent while keeping piece-position state
 incremental.
@@ -169,7 +169,7 @@ incremental path should update only:
 
 ## X2 Direction
 
-X2 keeps the MagnusChessX Thinking feature definitions while adopting a more
+X2 keeps the MACE-Kraken-v1 feature definitions while adopting a more
 separated accumulator layout:
 
 - piece transformer and attack-edge transformer are stored separately and
@@ -190,6 +190,6 @@ X2 dimensions:
 | Quantised transformer | piece i16 + edge i8 |
 | Approximate network size | 77.3 MiB |
 
-Attack-edge indices are independently defined for MagnusChessX Thinking by
+Attack-edge indices are independently defined for MACE-Kraken-v1 by
 relative attacker colour, attacker piece type, source square, legal empty-board
 target slot, and relative target piece class.

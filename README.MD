@@ -10,11 +10,11 @@
 
 </div>
 
-MagnusChessX is a [C++20][cpp20-link] [UCI][uci-protocol-link] chess engine by Theodore Magnus &Oslash;en Nidhar, developed in its current form since 2026-03-24.
+**MACE-Kraken-v1** (**Magnus Algorithm Chess Engine — Kraken**) is a [C++20][cpp20-link] [UCI][uci-protocol-link] chess engine by Theodore Magnus &Oslash;en Nidhar, developed in the MagnusChessX repository.
 
-The official engine name is **MagXTK-14SM1**. It is the first official release in the MagXTK series, its software release version is **1.0.0**, and it is derived from the MagnusChess family.
+The official engine name is **MACE-Kraken-v1**. `MACE` expands to **Magnus Algorithm Chess Engine**, `Kraken` is the engine line, and `v1` is its first public version. It is derived from the MagnusChess family.
 
-MagXTK-14SM1 is a low-strength reference engine with rudimentary positional understanding and limited practical competitiveness. It communicates over the [Universal Chess Interface][uci-protocol-link], which means you can talk to it in the terminal,
+MACE-Kraken-v1 communicates over the [Universal Chess Interface][uci-protocol-link], which means you can talk to it in the terminal,
 or install it into a UCI-compatible graphical user interface, like [En Croissant](https://encroissant.org/download) or [Nibbler](https://github.com/rooklift/nibbler).
 
 The default network line is P2 MNUE, maintained separately in [MagnusMNUE](https://github.com/TMagnusN/MagnusMNUE). P2 is the normal evaluation path used by ordinary search. MagnusChessX also contains an experimental X2-K16-pawn MNUE path, used to test a less conventional layout with separated piece, attack-edge, and pawn-pair feature families. X2 is included because its structure is interesting, not because it is advertised as the current strength target.
@@ -23,7 +23,7 @@ MagnusChessX supports Chess960 through `setoption name UCI_Chess960 value true`.
 
 PS: MagnusChessX's MNUE design learned a few architectural lessons from [Reckless](https://github.com/codedeliveryservice/Reckless).
 
-## Building MagnusChessX
+## Building MACE-Kraken-v1
 
 If you only want to build and run the engine, you need a [`g++`][gcc-link] compiler with basic [C++20][cpp20-link] support and [GNU Make][make-link].
 For the trainer side of the project, make sure you have [Rust][rust-link] installed.
@@ -36,7 +36,7 @@ In my opinion, if you only need the engine, you do not need to install Rust.
 
    Make sure your machine is connected to the network. The [Makefile](Src/Makefile) will automatically download the default embedded network when it is missing. You can also download the network manually and place it in the `build` directory.
 
-4. Build MagnusChessX.
+4. Build MACE-Kraken-v1.
 
    **On Windows**, it is recommended to run
    ```text

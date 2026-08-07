@@ -43,7 +43,7 @@ struct Position;
 }
 
 /*
- * Search public interface — the core search engine of MagnusChessX Thinking.
+ * Search public interface — Magnus Algorithm Chess Engine — Kraken.
  *
  * This header exposes two entry points:
  *   1. iterative_deepening() — launches an iterative-deepening PVS search from the

@@ -30,7 +30,7 @@ SOFTWARE.
 #include <string_view>
 
 /*
- * MagnusChessX Thinking Command-Line Entry Point — Program Launch and Mode Dispatch
+ * Magnus Algorithm Chess Engine — Kraken Command-Line Entry Point
  *
  * No arguments or "uci" → Start UCI protocol loop (run_uci)
  * "bench"/"perft" → Start lightweight command-line tool (run_bench)

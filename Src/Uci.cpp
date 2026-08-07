@@ -64,7 +64,7 @@ SOFTWARE.
 #endif
 
 /*
- * MagnusChessX Thinking UCI Frontend — Universal Chess Interface Implementation
+ * Magnus Algorithm Chess Engine — Kraken UCI Frontend
  *
  * Complete UCI protocol implementation, comprising the following modules:
  *
@@ -93,7 +93,7 @@ namespace magnus {
 
 namespace {
 
-constexpr std::string_view ENGINE_NAME = "MagXTK-14SM1";
+constexpr std::string_view ENGINE_NAME = "MACE-Kraken-v1";
 constexpr int DEFAULT_UCI_HASH_MB = 16;
 constexpr int DEFAULT_UCI_THREADS = 1;
 constexpr int MAX_UCI_THREADS = 512;
@@ -1869,9 +1869,9 @@ struct UciSession {
 int run_bench(int argc, char** argv) {
     const auto print_usage = []() {
         std::cerr
-            << "usage: MagXTK-14SM1.exe bench [depth=12] [hash_mb=16] [threads=1] [stage=A]\n"
-            << "       MagXTK-14SM1.exe perft <depth>\n"
-            << "       MagXTK-14SM1.exe spsa [json|csv]\n";
+            << "usage: MACE-Kraken-v1.exe bench [depth=12] [hash_mb=16] [threads=1] [stage=A]\n"
+            << "       MACE-Kraken-v1.exe perft <depth>\n"
+            << "       MACE-Kraken-v1.exe spsa [json|csv]\n";
     };
 
     if (argc <= 1) {

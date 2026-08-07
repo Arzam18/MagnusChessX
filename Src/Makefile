@@ -1,6 +1,6 @@
 ﻿CXX := g++
 CC := gcc
-TARGET := MagXTK-14SM1
+TARGET := MACE-Kraken-v1
 
 BUILD_PROFILE ?= auto
 PGO ?= 0
@@ -10,7 +10,7 @@ TARGET_TRIPLE := $(shell $(CXX) -dumpmachine)
 X86_64_TARGET := $(filter x86_64% amd64%,$(TARGET_TRIPLE))
 
 ifeq ($(X86_64_TARGET),)
-  $(error MagXTK-14SM1 64-bit profiles require an x86_64 compiler target; got '$(TARGET_TRIPLE)')
+  $(error MACE-Kraken-v1 64-bit profiles require an x86_64 compiler target; got '$(TARGET_TRIPLE)')
 endif
 
 ifeq ($(BUILD_PROFILE),auto)
@@ -35,7 +35,7 @@ endif
 
 # Embedded P2-family network - single source of truth for the filename.
 # Changing this updates MnueEmbedded.S, Mnue.cpp, and Uci.cpp automatically.
-MNUE_EMBEDDED_FILE := magxtk-master-p2h32-s8011M-o3183M-c+frc.mnue
+MNUE_EMBEDDED_FILE := mace-kraken-v1-p2h32-s8011M-o3183M-c+frc.mnue
 
 # Fresh-clone helper: keep the large MNUE out of git.
 # Linux server uses the local file first; other workers fall back to GitHub raw.
@@ -259,7 +259,7 @@ DEFAULT_OUTPUT := $(BUILD_DIR)/$(OUTPUT_BASENAME)$(EXEEXT)
 
 # External build systems may call make with EXE=<expected-binary-name>.
 # When EXE is provided, write the final engine exactly there instead of
-# always writing build/MagXTK-14SM1[.exe].
+# always writing build/MACE-Kraken-v1[.exe].
 ifeq ($(strip $(EXE)),)
 	OUTPUT := $(DEFAULT_OUTPUT)
 	PGO_OUTPUT := $(BUILD_DIR)/$(TARGET)-$(EFFECTIVE_PROFILE)-pgo$(EXEEXT)

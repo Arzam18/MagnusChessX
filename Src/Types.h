@@ -27,7 +27,7 @@ SOFTWARE.
 #include <cstdint>
 
 /*
- * Global Type Definitions — Foundation type system for MagnusChessX Thinking
+ * Global Type Definitions — Magnus Algorithm Chess Engine — Kraken
  *
  * All modules (move generation, search, evaluation, hashing) share the
  * scalar aliases, enumerations, and bit-operation helper functions defined here.
