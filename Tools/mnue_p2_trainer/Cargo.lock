@@ -175,7 +175,9 @@ version = "0.1.0"
 dependencies = [
  "bullet_lib",
  "bulletformat",
+ "serde",
  "sfbinpack",
+ "toml",
 ]
 
 [[package]]
@@ -186,10 +188,15 @@ version = "0.1.0"
 name = "mnue_p2_trainer"
 version = "0.1.0"
 dependencies = [
+ "bullet-compiler",
+ "bullet-gpu",
+ "bullet-trainer",
  "bullet_lib",
  "bulletformat",
  "mnue_binpack_loader",
  "mnue_data_schedule",
+ "serde",
+ "toml",
 ]
 
 [[package]]

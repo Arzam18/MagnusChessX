@@ -64,7 +64,7 @@ SOFTWARE.
 #endif
 
 /*
- * MagnusChessX Thinking UCI Frontend — Universal Chess Interface Implementation
+ * Magnus Algorithm Chess Engine — Kraken UCI Frontend
  *
  * Complete UCI protocol implementation, comprising the following modules:
  *
@@ -93,7 +93,7 @@ namespace magnus {
 
 namespace {
 
-constexpr std::string_view ENGINE_NAME = "MagXTK-14SM1";
+constexpr std::string_view ENGINE_NAME = "MACE-Kraken-v1";
 constexpr int DEFAULT_UCI_HASH_MB = 16;
 constexpr int DEFAULT_UCI_THREADS = 1;
 constexpr int MAX_UCI_THREADS = 512;
@@ -201,6 +201,19 @@ constexpr std::array<std::string_view, 50> SEARCH_BENCH_FENS{{
     "r1bqk2r/pp1nppbp/2np4/6B1/2P5/2NQPN2/PP3PPP/R3KB1R w KQkq - 1 9",
     "rnbq1rk1/1p2ppb1/p1p2n1p/3p2p1/2PP4/2N1PNBP/PP3PP1/R2QKB1R w KQ - 1 9",
     "rn2k2r/ppq2p1p/2ppbp2/2b1p3/2B1P2N/3P4/PPP2PPP/RN1Q1RK1 w kq - 2 9",
+}};
+
+// Chess960 positions are kept in the normal bench so the same workload used
+// for regression checks also trains the PGO build. The first two mirror the
+// Stockfish bench (the first is stored after its move sequence); the remaining
+// positions make a Chess960 castle immediately available and exercise overlap
+// cases where a king destination or rook destination is already occupied by
+// the participating rook.
+constexpr std::array<std::string_view, 4> SEARCH_BENCH_FRC_FENS{{
+    "bb1n1rkr/ppp1Q1pp/3n1p2/3p4/3P4/6Pq/PPP1PP1P/BB1NNRKR w HFhf - 0 5",
+    "nqbnrkrb/pppppppp/8/8/8/8/PPPPPPPP/NQBNRKRB w KQkq - 0 1",
+    "bb1rknrq/pppppppp/8/5N2/2P5/3P4/nP2PPPP/BBNRK1RQ w GDgd - 0 5",
+    "rbk2r1q/1ppbpnpp/3p1p1n/p7/1P2PP1P/6P1/P1PP4/RBKNBRNQ b FAfa - 2 7",
 }};
 
 [[nodiscard]] const std::string& get_executable_dir() {
@@ -312,16 +325,24 @@ inline void push_position_history(
     return result;
 }
 
-[[nodiscard]] std::string display_castling_rights(int rights) {
+[[nodiscard]] std::string display_castling_rights(const Position& pos) {
     std::string result;
-    if ((rights & WHITE_OO) != 0)
-        result.push_back('K');
-    if ((rights & WHITE_OOO) != 0)
-        result.push_back('Q');
-    if ((rights & BLACK_OO) != 0)
-        result.push_back('k');
-    if ((rights & BLACK_OOO) != 0)
-        result.push_back('q');
+    const auto append = [&](int right, char standard) {
+        if ((pos.castling_rights & right) == 0)
+            return;
+        if (!pos.chess960) {
+            result.push_back(standard);
+            return;
+        }
+
+        const Square rook_from = pos.castling_rook_square[right];
+        const char base = right == WHITE_OO || right == WHITE_OOO ? 'A' : 'a';
+        result.push_back(static_cast<char>(base + file_of(rook_from)));
+    };
+    append(WHITE_OO, 'K');
+    append(WHITE_OOO, 'Q');
+    append(BLACK_OO, 'k');
+    append(BLACK_OOO, 'q');
     return result.empty() ? "-" : result;
 }
 
@@ -352,7 +373,7 @@ inline void push_position_history(
     }
 
     fen += pos.side_to_move == WHITE ? " w " : " b ";
-    fen += display_castling_rights(pos.castling_rights);
+    fen += display_castling_rights(pos);
     fen.push_back(' ');
     fen += display_square(pos.ep_sq);
     fen.push_back(' ');
@@ -496,7 +517,8 @@ void display_position(const Position& pos, std::ostream& out) {
     Position& pos,
     const memory::Memory& mem,
     std::string_view command,
-    PositionHistory& history
+    PositionHistory& history,
+    bool chess960
 ) noexcept {
     std::istringstream iss{std::string(command)};
     std::string token;
@@ -505,7 +527,7 @@ void display_position(const Position& pos, std::ostream& out) {
         return false;
 
     if (token == "startpos") {
-        set_start_position(pos);
+        set_start_position(pos, chess960);
         position_refresh_key(pos, mem.tables);
     } else if (token == "fen") {
         std::string fen;
@@ -520,7 +542,7 @@ void display_position(const Position& pos, std::ostream& out) {
             fen += part;
         }
 
-        if (!parse_fen(pos, mem, fen))
+        if (!parse_fen(pos, mem, fen, chess960))
             return false;
     } else {
         return false;
@@ -762,15 +784,19 @@ struct SearchBenchResult {
 
     if (!quiet) {
         out << "--------------------------------------------------\n";
-        out << "          Nodes       Elapsed             NPS\n";
+        out << "      Variant       Nodes       Elapsed             NPS\n";
         out << "--------------------------------------------------\n";
     }
 
-    for (std::size_t i = 0; i < SEARCH_BENCH_FENS.size(); ++i) {
+    std::size_t position_index = 0;
+    const auto run_position = [&](std::string_view fen, bool chess960) {
         Position bench_pos{};
-        const std::string_view fen = SEARCH_BENCH_FENS[i];
-        if (!parse_fen(bench_pos, mem, fen))
+        if (!parse_fen(bench_pos, mem, fen, chess960)) {
+            out << "info string invalid "
+                << (chess960 ? "FRC" : "classical")
+                << " bench position " << position_index << '\n';
             return false;
+        }
 
         search::SearchLimits limits{};
         limits.depth = depth;
@@ -796,16 +822,27 @@ struct SearchBenchResult {
         checksum = (checksum * 1315423911ULL)
             ^ res.search.nodes
             ^ (static_cast<u64>(res.search.best_move) << 32)
-            ^ static_cast<u64>(static_cast<unsigned>(res.search.score));
+            ^ static_cast<u64>(static_cast<unsigned>(res.search.score))
+            ^ (static_cast<u64>(chess960) << 63);
 
         if (!quiet) {
-            out << std::setw(3) << i
+            out << std::setw(3) << position_index
+                << std::setw(9) << (chess960 ? "frc" : "classic")
                 << std::setw(12) << res.search.nodes
                 << std::setw(13) << std::fixed << std::setprecision(3)
                 << res.seconds << "s"
                 << std::setw(16) << res.nps << " N/s\n";
         }
-    }
+        ++position_index;
+        return true;
+    };
+
+    for (const std::string_view fen : SEARCH_BENCH_FENS)
+        if (!run_position(fen, false))
+            return false;
+    for (const std::string_view fen : SEARCH_BENCH_FRC_FENS)
+        if (!run_position(fen, true))
+            return false;
 
     const u64 total_nps = total_seconds > 0.0
         ? static_cast<u64>(static_cast<double>(total_nodes) / total_seconds)
@@ -825,11 +862,15 @@ struct SearchBenchResult {
             << (eval_kind == search::SearchEvalKind::X2K16
                 ? search_eval_kind_name(eval_kind)
                 : mnue::p2_eval_name())
+            << " positions " << position_index
+            << " frc " << SEARCH_BENCH_FRC_FENS.size()
             << " checksum " << checksum
             << '\n';
     }
 
-    out << "Bench: " << total_nodes << " nodes " << total_nps << " nps\n";
+    out << "Bench: " << total_nodes << " nodes " << total_nps
+        << " nps positions " << position_index
+        << " frc " << SEARCH_BENCH_FRC_FENS.size() << '\n';
     return true;
 }
 
@@ -879,7 +920,7 @@ struct SearchBenchResult {
         unmake_move(pos, move, mem.tables, st);
 
         total += nodes;
-        out << search::move_to_uci(move) << ' ' << nodes << '\n';
+        out << search::move_to_uci(move, pos.chess960) << ' ' << nodes << '\n';
     }
 
     out << "nodes " << total << '\n';
@@ -907,6 +948,7 @@ struct UciSession {
     PositionHistory position_history{};
     timeman::TimeManager time_manager{};
     bool enable_ponder = true;
+    bool chess960 = false;
     bool full_pv = false;
     bool use_msv_smp = false;
     bool msv_info = false;
@@ -931,7 +973,7 @@ struct UciSession {
             static_cast<std::size_t>(DEFAULT_UCI_THREADS)
         );
         // attack_init_backend deferred to first command that needs it.
-        set_start_position(pos);
+        set_start_position(pos, chess960);
         position_refresh_key(pos, mem.tables);
         (void)ensure_eval_loaded(nullptr);
     }
@@ -1022,6 +1064,7 @@ struct UciSession {
             << " min " << timeman::MIN_MOVE_OVERHEAD_MS
             << " max " << timeman::MAX_MOVE_OVERHEAD_MS << "\n";
         out << "option name Ponder type check default true\n";
+        out << "option name UCI_Chess960 type check default false\n";
         out << "option name SyzygyPath type string default <empty>\n";
         out << "option name SyzygyProbeDepth type spin default "
             << syzygy::DEFAULT_PROBE_DEPTH
@@ -1042,7 +1085,7 @@ struct UciSession {
     void reset_new_game() {
         memory::memory_clear_hash(mem);
         search_session_state.new_game();
-        set_start_position(pos);
+        set_start_position(pos, chess960);
         position_refresh_key(pos, mem.tables);
         clear_position_history(position_history);
         time_manager.new_game();
@@ -1201,6 +1244,17 @@ struct UciSession {
             bool parsed = false;
             if (parse_bool(value, parsed))
                 enable_ponder = parsed;
+        }
+        else if (name == "UCI_Chess960") {
+            bool parsed = false;
+            if (parse_bool(value, parsed) && parsed != chess960) {
+                stop_search();
+                chess960 = parsed;
+                pos.chess960 = chess960;
+                memory::memory_clear_hash(mem);
+                search_session_state.new_game();
+                clear_position_history(position_history);
+            }
         }
         else if (name == "SyzygyPath") {
             syzygy_path = value == "<empty>" ? std::string{} : value;
@@ -1471,7 +1525,8 @@ struct UciSession {
                 pos,
                 mem,
                 command_arguments(line, "position"),
-                position_history
+                position_history,
+                chess960
             )) {
             out << "info string invalid position command\n";
             return;
@@ -1494,7 +1549,7 @@ struct UciSession {
             return;
         }
 
-        if (!parse_fen(pos, mem, fen)) {
+        if (!parse_fen(pos, mem, fen, chess960)) {
             out << "invalid -> " << command << '\n';
             out << "usage -> " << command << " [->] <fen>\n";
             return;
@@ -1596,7 +1651,8 @@ struct UciSession {
                 &limits
             );
 
-            std::cout << "bestmove " << search::move_to_uci(result.best_move);
+            std::cout << "bestmove "
+                      << search::move_to_uci(result.best_move, root.chess960);
             if (enable_ponder && !ponder.empty())
                 std::cout << " ponder " << ponder;
             std::cout << std::endl;
@@ -1813,9 +1869,9 @@ struct UciSession {
 int run_bench(int argc, char** argv) {
     const auto print_usage = []() {
         std::cerr
-            << "usage: MagXTK-14SM1.exe bench [depth=12] [hash_mb=16] [threads=1] [stage=A]\n"
-            << "       MagXTK-14SM1.exe perft <depth>\n"
-            << "       MagXTK-14SM1.exe spsa [json|csv]\n";
+            << "usage: MACE-Kraken-v1.exe bench [depth=12] [hash_mb=16] [threads=1] [stage=A]\n"
+            << "       MACE-Kraken-v1.exe perft <depth>\n"
+            << "       MACE-Kraken-v1.exe spsa [json|csv]\n";
     };
 
     if (argc <= 1) {

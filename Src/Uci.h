@@ -25,7 +25,7 @@ SOFTWARE.
 #pragma once
 
 /*
- * UCI Frontend — Universal Chess Interface for MagnusChessX Thinking
+ * UCI Frontend — Magnus Algorithm Chess Engine — Kraken
  *
  * This module implements a complete UCI protocol frontend, responsible for:
  *   1. UCI command parsing (go / position / setoption / stop / ponderhit / quit / uci / isready / ucinewgame)

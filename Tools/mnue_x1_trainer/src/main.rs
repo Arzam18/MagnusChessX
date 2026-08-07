@@ -1,5 +1,5 @@
 /*
-MNUE-X1 smoke trainer for MagnusChessX Thinking.
+MNUE-X1 smoke trainer for MACE-Kraken-v1.
 
 Run from this directory:
 

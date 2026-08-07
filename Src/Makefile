@@ -1,15 +1,16 @@
 ﻿CXX := g++
 CC := gcc
-TARGET := MagXTK-14SM1
+TARGET := MACE-Kraken-v1
 
 BUILD_PROFILE ?= auto
 PGO ?= 0
+EXTRA_CPPFLAGS ?=
 BUILD_DIR := build
 TARGET_TRIPLE := $(shell $(CXX) -dumpmachine)
 X86_64_TARGET := $(filter x86_64% amd64%,$(TARGET_TRIPLE))
 
 ifeq ($(X86_64_TARGET),)
-  $(error MagXTK-14SM1 64-bit profiles require an x86_64 compiler target; got '$(TARGET_TRIPLE)')
+  $(error MACE-Kraken-v1 64-bit profiles require an x86_64 compiler target; got '$(TARGET_TRIPLE)')
 endif
 
 ifeq ($(BUILD_PROFILE),auto)
@@ -34,7 +35,7 @@ endif
 
 # Embedded P2-family network - single source of truth for the filename.
 # Changing this updates MnueEmbedded.S, Mnue.cpp, and Uci.cpp automatically.
-MNUE_EMBEDDED_FILE := mm-4ac81907e.MNUE
+MNUE_EMBEDDED_FILE := mace-kraken-v1-p2h32-s8011M-o3183M-c+frc.mnue
 
 # Fresh-clone helper: keep the large MNUE out of git.
 # Linux server uses the local file first; other workers fall back to GitHub raw.
@@ -45,6 +46,7 @@ OBJ_VARIANT ?= normal
 OBJ_DIR := $(BUILD_DIR)/obj/$(EFFECTIVE_PROFILE)/$(OBJ_VARIANT)
 PGO_DIR := $(BUILD_DIR)/pgo/$(EFFECTIVE_PROFILE)
 PGO_BENCH_LOG := $(PGO_DIR)/bench.log
+# The normal bench contains both classical and Chess960 search positions.
 PGO_BENCH_ARGS ?= bench
 
 SRC := \
@@ -165,7 +167,7 @@ WARN_FLAGS := \
 	-Wno-unused-parameter \
 	-Wno-sign-conversion
 
-CPPFLAGS := -MMD -MP -iquote . -I$(FATHOM_DIR) $(PROFILE_CPPFLAGS) \
+CPPFLAGS := -MMD -MP -iquote . -I$(FATHOM_DIR) $(PROFILE_CPPFLAGS) $(EXTRA_CPPFLAGS) \
 	-DMNUE_EMBEDDED_FILENAME='"$(MNUE_EMBEDDED_FILE)"'
 
 BASE_CXXFLAGS := \
@@ -224,13 +226,24 @@ LDLIBS :=
 ifeq ($(OS),Windows_NT)
 	EXEEXT := .exe
 
-	fixpath = $(subst /,\,$(1))
+	# MSYS2 shells (including UCRT64) report Windows_NT but execute recipes
+	# with /bin/sh, so cmd.exe commands such as "if exist" are invalid there.
+	ifneq ($(strip $(MSYSTEM)),)
+		RECIPE_SHELL := posix
+		MKDIR_P = mkdir -p "$(1)"
+		RM_F    = rm -f "$(1)"
+		RMDIR_R = rm -rf "$(1)"
+	else
+		RECIPE_SHELL := cmd
+		fixpath = $(subst /,\,$(1))
 
-	MKDIR_P = if not exist "$(call fixpath,$(1))" mkdir "$(call fixpath,$(1))"
-	RM_F    = if exist "$(call fixpath,$(1))" del /q "$(call fixpath,$(1))"
-	RMDIR_R = if exist "$(call fixpath,$(1))" rmdir /s /q "$(call fixpath,$(1))"
+		MKDIR_P = if not exist "$(call fixpath,$(1))" mkdir "$(call fixpath,$(1))"
+		RM_F    = if exist "$(call fixpath,$(1))" del /q "$(call fixpath,$(1))"
+		RMDIR_R = if exist "$(call fixpath,$(1))" rmdir /s /q "$(call fixpath,$(1))"
+	endif
 else
 	EXEEXT :=
+	RECIPE_SHELL := posix
 	MKDIR_P = mkdir -p "$(1)"
 	RM_F    = rm -f "$(1)"
 	RMDIR_R = rm -rf "$(1)"
@@ -246,7 +259,7 @@ DEFAULT_OUTPUT := $(BUILD_DIR)/$(OUTPUT_BASENAME)$(EXEEXT)
 
 # External build systems may call make with EXE=<expected-binary-name>.
 # When EXE is provided, write the final engine exactly there instead of
-# always writing build/MagXTK-14SM1[.exe].
+# always writing build/MACE-Kraken-v1[.exe].
 ifeq ($(strip $(EXE)),)
 	OUTPUT := $(DEFAULT_OUTPUT)
 	PGO_OUTPUT := $(BUILD_DIR)/$(TARGET)-$(EFFECTIVE_PROFILE)-pgo$(EXEEXT)
@@ -258,6 +271,7 @@ endif
 PROFGEN_OUTPUT := $(BUILD_DIR)/$(TARGET)-$(EFFECTIVE_PROFILE)-profgen$(EXEEXT)
 TIME_TEST_OUTPUT := $(BUILD_DIR)/TimeManagementTests-$(EFFECTIVE_PROFILE)$(EXEEXT)
 SEARCH_REFERENCE_TEST_OUTPUT := $(BUILD_DIR)/SearchReferenceTests-$(EFFECTIVE_PROFILE)$(EXEEXT)
+CHESS960_TEST_OUTPUT := $(BUILD_DIR)/Chess960Tests-$(EFFECTIVE_PROFILE)$(EXEEXT)
 
 ifeq ($(PGO),1)
 	AUTO_BUILD_TARGET := profile-build
@@ -267,7 +281,7 @@ else
 	FINAL_OUTPUT := $(OUTPUT)
 endif
 
-ifeq ($(OS),Windows_NT)
+ifeq ($(RECIPE_SHELL),cmd)
 	RUN_CMD = .\$(call fixpath,$(FINAL_OUTPUT))
 	RUN_PROFGEN_CMD = .\$(call fixpath,$(PROFGEN_OUTPUT))
 	RUN_PGO_CMD = .\$(call fixpath,$(PGO_OUTPUT))
@@ -281,7 +295,7 @@ endif
 
 .PHONY: all auto portable64 native64 avx2+bmi2 avx512+bmi2 variants cpu-variants detect build release releases \
 	pgo profile-build pgo-step1 pgo-step2 pgo-step3 \
-	pgo-generate-build pgo-use-build run time-test search-reference-test \
+	pgo-generate-build pgo-use-build run time-test search-reference-test chess960-test \
 	clean objclean pgo-clean distclean
 
 all: auto
@@ -338,7 +352,7 @@ $(FATHOM_OBJ): \
 	$(CC) $(FATHOM_CFLAGS) -c $(FATHOM_DIR)/tbprobe.c -o $@
 
 # Generate/copy/download embedded MNUE for clean clones.
-ifeq ($(OS),Windows_NT)
+ifeq ($(RECIPE_SHELL),cmd)
 build/$(MNUE_EMBEDDED_FILE):
 	$(call MKDIR_P,$(BUILD_DIR))
 	@echo Downloading embedded MNUE: $(MNUE_EMBEDDED_URL)
@@ -432,6 +446,14 @@ $(SEARCH_REFERENCE_TEST_OUTPUT): tests/SearchReferenceTests.cpp $(filter-out $(O
 search-reference-test: $(SEARCH_REFERENCE_TEST_OUTPUT)
 	$(SEARCH_REFERENCE_TEST_OUTPUT)
 
+$(CHESS960_TEST_OUTPUT): tests/Chess960Tests.cpp $(filter-out $(OBJ_DIR)/Main.o $(OBJ_DIR)/Uci.o,$(OBJ)) | $(OBJ_DIR)
+	$(CXX) $(BASE_CXXFLAGS) tests/Chess960Tests.cpp \
+		$(filter-out $(OBJ_DIR)/Main.o $(OBJ_DIR)/Uci.o,$(OBJ)) \
+		-o $@ $(BASE_LDFLAGS) $(LDLIBS)
+
+chess960-test: $(CHESS960_TEST_OUTPUT)
+	$(CHESS960_TEST_OUTPUT)
+
 objclean:
 	$(call RMDIR_R,$(OBJ_DIR))
 
@@ -455,6 +477,8 @@ clean:
 	$(call RM_F,$(BUILD_DIR)/$(TARGET)-avx512+bmi2-pgo$(EXEEXT))
 	$(call RM_F,$(BUILD_DIR)/TimeManagementTests-portable64$(EXEEXT))
 	$(call RM_F,$(BUILD_DIR)/TimeManagementTests-native64$(EXEEXT))
+	$(call RM_F,$(BUILD_DIR)/Chess960Tests-portable64$(EXEEXT))
+	$(call RM_F,$(BUILD_DIR)/Chess960Tests-native64$(EXEEXT))
 
 distclean: clean
 	$(call RMDIR_R,$(BUILD_DIR)/pgo)

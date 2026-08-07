@@ -22,7 +22,8 @@ Pass it to Cargo with `--config <local-bullet-config.toml>`.
 
 ## Supported Layouts
 
-Select the layout with `--arch p2` or `--arch p2-k32`. The default is `p2`.
+Select the layout with `--arch p2`, `--arch p2-k32`, or `--arch p2-h32`.
+The default is `p2`.
 
 ### P2
 
@@ -81,6 +82,25 @@ Output buckets are:
 phase_bucket2 x stm_king_zone32 = 64
 ```
 
+### P2-H32
+
+P2-H32 is a separate, incompatible hybrid architecture. For each perspective,
+the board is first oriented vertically; when the relative own king is on files
+e-h, the king and every feature square are then mirrored horizontally.
+
+```text
+coarse branch = 16 x 10 x 64 = 10240 inputs -> 768 hidden
+fine branch   = 32 x 11 x 64 = 22528 inputs -> 256 hidden
+representation = (768 + 256) x 2 perspectives = 2048
+output buckets = material_phase4 x coarse_stm_king16 = 64
+```
+
+The coarse branch contains friendly/enemy P/N/B/R/Q planes. The fine branch
+adds one enemy-king plane; the own king is represented by the exact K32 bucket.
+The material phases use N/B=1, R=2, Q=4 and ranges 18-24, 12-17, 6-11, and
+0-5. The raw quantised payload is exactly 27,527,296 bytes; headered networks
+use architecture id 9 and are 27,527,336 bytes.
+
 The exported `.mnue` file has the standard 40-byte Magnus MNUE header followed
 by the Bullet `quantised.bin` payload.
 
@@ -98,13 +118,50 @@ Example P2-K32 100M / 5-superbatch smoke run:
 cargo run --manifest-path Tools/mnue_p2_trainer/Cargo.toml --release --features cuda -- --arch p2-k32 --name mnue_p2k32_100m_5sb --data <train.data> --positions 100000000 --batch-size 65536 --threads 12 --superbatches 5 --lr 0.001 --lr-final 0.0001 --l0-init-scale 0.25 --save-sb 1
 ```
 
+Example P2-H32 run on direct shuffled BulletFormat data:
+
+```powershell
+cargo run --manifest-path Tools/mnue_p2_trainer/Cargo.toml --release --features cuda -- `
+  --arch p2-h32 --name mnue_p2h32_10b_200sb `
+  --data D:\NNUE\train_3b_shuffled.data --shuffle-mode sequential `
+  --positions 10000000000 --batch-size 131072 --threads 12 `
+  --superbatches 200 --save-sb 4 `
+  --lr 0.001 --lr-final 0.0000625 `
+  --l0-init-scale 0.25 --fine-init-scale 0.125
+```
+
+Fresh normal-P2 `.binpack` runs default to full-dataset shuffle. For the
+165,936,222-position generated dataset, five requested passes round up to
+829,685,760 effective positions with the settings below, so six virtual epochs
+are required to cover the final 4,650 positions:
+
+```powershell
+cargo run --manifest-path Tools/mnue_p2_trainer/Cargo.toml --release --features cuda -- `
+  --arch p2 --name mnue_p2_generated_829m_5x_20sb `
+  --data-dir D:\NNUE\data\Stockfish-tools\generated `
+  --chunk-shuffle-seed 1 --chunk-virtual-epochs 6 `
+  --positions 829681110 --batch-size 32768 --threads 20 --superbatches 20 `
+  --lr 0.001 --lr-final 0.0000625 --l0-init-scale 0.25 --save-sb 1
+```
+
+The first invocation builds
+`D:\NNUE\data\Stockfish-tools\generated\.mnue-p2-shuffle-cache`. It contains
+64 native 32-byte BulletFormat shards (5,309,959,104 bytes for this dataset)
+and a versioned `manifest.toml`. Later runs reuse it when all source SHA-256
+fingerprints still match.
+
 Important parameters:
 
 ```text
---arch p2|p2-k32  trainer architecture, default p2
+--arch p2|p2-k32|p2-h32 trainer architecture, default p2
 --name NAME          net id, output directory name, checkpoint prefix
 --data PATH          training .data or .binpack file; repeatable
 --data-dir DIR       directory of .binpack chunks; repeatable
+--chunk-shuffle-seed N deterministic file and position shuffle seed
+--chunk-virtual-epochs N number of shuffled passes scheduled per pool
+--chunk-sample N     optional number of distinct files selected per virtual epoch
+--shuffle-mode MODE  dataset, interleaved, or sequential
+--shuffle-cache-dir PATH explicit dataset cache path; required for multiple input roots
 --positions N        total training positions
 --batch-size N       positions per GPU batch
 --threads N          CPU data-prep threads
@@ -112,8 +169,11 @@ Important parameters:
 --lr X               initial learning rate
 --lr-final X         final exponential-decay learning rate
 --l0-init-scale X    multiplier for l0 weight init stdev
+--fine-init-scale X  H32 fine-branch init multiplier, default 0.125
 --save-sb N          save one checkpoint every N superbatches
 --save-rate N        alias for --save-sb
+--resume-from PATH   checkpoint directory whose optimiser state should be loaded
+--start-superbatch N first superbatch to train after loading a checkpoint
 --output-dir PATH    checkpoint root, default runs/<name>
 --net-dir PATH       exported .mnue directory, default nets/mnue
 ```
@@ -121,12 +181,78 @@ Important parameters:
 Training input is required. Use either one or more `--data` paths, or one or
 more `--data-dir` directories containing `.binpack` chunks.
 
+`dataset` mode decodes every sorted source once, validates WDL, and assigns
+each position to one of 64 shards with a fixed hash independent of the training
+seed. Every epoch deterministically reshuffles the shard order and performs a
+separate Fisher-Yates shuffle inside each loaded shard while prefetching the
+next shard. Every position occurs exactly once per epoch. Resume skips complete
+epochs and shards and reconstructs only the current shard, so its suffix is
+position-for-position identical to uninterrupted training. `--chunk-sample`
+is intentionally rejected in this mode.
+
+`interleaved` retains the previous 16,384-position stripe loader and 256 MiB
+shuffle buffer. The old `--chunk-resample-on-exhaustion` flag still selects
+this mode but prints a deprecation warning. `sequential` retains the native
+legacy Bullet loader. P2-K32 defaults remain unchanged; dataset mode supports
+normal P2 and P2-H32.
+
+Fresh runs write `run_manifest.toml` in the checkpoint root. It pins shuffle
+mode, source/cache fingerprints, seed, architecture, learning-rate schedule,
+superbatch count, and effective positions per superbatch. A new checkpoint
+resume must match it. Threads may change; batch size may change only when
+positions per superbatch remain exactly equal. A checkpoint made before this
+manifest existed automatically uses legacy `sequential` mode, does not build a
+dataset cache, and cannot be switched to dataset mode during resume. Start a
+new run name to adopt the new shuffle.
+
+Direct `.data` files are identified from canonical path, byte size, and file
+modification time. The trainer does not hash or scan the full `.data` file at
+startup. Content SHA-256 remains limited to the binpack dataset-cache builder,
+where it is needed for cache invalidation.
+
 Outputs:
 
 ```text
 runs/<name>/<name>-<superbatch>/quantised.bin
 nets/mnue/<name>-<superbatch>.mnue
 ```
+
+### Resume an Interrupted Run
+
+Checkpoints contain the model weights plus the optimiser momentum and velocity.
+Resume with the original run name, output directory, total position count,
+superbatch count, and learning-rate settings. Point `--resume-from` at the last
+complete checkpoint and set `--start-superbatch` to the next one:
+
+```powershell
+cargo run --manifest-path Tools/mnue_p2_trainer/Cargo.toml --release --features cuda -- `
+  --arch p2 `
+  --name mnue_p2_generated_829m_5x_20sb `
+  --data-dir D:\NNUE\data\Stockfish-tools\generated `
+  --chunk-shuffle-seed 1 `
+  --chunk-virtual-epochs 6 `
+  --positions 829681110 `
+  --batch-size 32768 `
+  --threads 20 `
+  --superbatches 20 `
+  --save-sb 1 `
+  --lr 0.001 `
+  --lr-final 0.0000625 `
+  --l0-init-scale 0.25 `
+  --resume-from D:\MagnusChessX\runs\mnue_p2_generated_829m_5x_20sb\mnue_p2_generated_829m_5x_20sb-9 `
+  --start-superbatch 10
+```
+
+The trainer validates the optimiser-state files before initialising training,
+skips the positions belonging to completed superbatches, preserves the
+absolute learning-rate schedule, and refuses to overwrite checkpoint
+directories at or after `--start-superbatch`.
+
+The batch size may be reduced for a resume only when the effective positions
+per superbatch remain unchanged. In the example, `65536 * 633` and
+`32768 * 1266` both equal `41,484,288` positions per superbatch.
+Reducing the batch size still increases the number of optimiser updates per
+position; it is a stability workaround, not a bit-equivalent continuation.
 
 ## Embedded Network Sync
 

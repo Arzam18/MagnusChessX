@@ -1,5 +1,5 @@
 /*
-MNUE-X2 smoke trainer for MagnusChessX Thinking.
+MNUE-X2 smoke trainer for MACE-Kraken-v1.
 
 The architecture takes the useful design principles observed in modern
 dual-accumulator NNUEs, while using an independently defined feature set:

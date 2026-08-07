@@ -75,7 +75,7 @@ public:
     MovePicker(
         Position& pos,
         const memory::Memory& mem,
-        const GenInfo& info,
+        GenInfo& info,
         const HistoryTables& history,
         Move tt_move,
         int ply,
@@ -117,7 +117,7 @@ private:
 
     Position& pos_;
     const memory::Memory& mem_;
-    const GenInfo& info_;
+    GenInfo& info_;
     const HistoryTables& history_;
 
     Move tt_move_ = Move(0);

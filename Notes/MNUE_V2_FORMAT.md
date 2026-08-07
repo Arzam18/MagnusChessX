@@ -141,7 +141,7 @@ Bullet's training graph retains its existing bucketed-affine implementation,
 which materialises bucket outputs before `select`; this is training-only and
 is not the required engine inference path.
 
-MagnusChessX Thinking integration and runtime diagnostics are documented in
+MACE-Kraken-v1 integration and runtime diagnostics are documented in
 [MNUE_V2_ENGINE.md](MNUE_V2_ENGINE.md).
 
 ## Commands

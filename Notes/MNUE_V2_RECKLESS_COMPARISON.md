@@ -8,15 +8,15 @@ figures, and promotional build notes.
 ## Purpose
 
 The comparison is useful only as an architecture reference. Reckless and
-MagnusChessX Thinking use different feature semantics, file formats, and
+MACE-Kraken-v1 uses different feature semantics, file formats, and
 evaluation layouts, so implementation details are not directly interchangeable.
-Any transferred idea must be re-derived inside the MagnusChessX Thinking code
+Any transferred idea must be re-derived inside the MACE-Kraken-v1 code
 base and validated against existing parity checks.
 
 ## License Boundary
 
 - Reckless is licensed under AGPL terms.
-- MagnusChessX Thinking is distributed under the MIT License.
+- MACE-Kraken-v1 is distributed under the MIT License.
 
 Copying or adapting Reckless implementation code would not be appropriate for
 an MIT-only distribution. Architectural ideas, public interfaces, dimensions,
@@ -53,7 +53,7 @@ Final input:
 The two sparse families are accumulated separately and summed before
 activation. They are not separate final networks.
 
-## MagnusChessX Thinking MNUEv2 Shape
+## MACE-Kraken-v1 MNUEv2 Shape
 
 MNUEv2 uses three sparse families with independent branch representations:
 
@@ -80,7 +80,7 @@ Reckless exposes a useful high-level pattern:
 4. make unmake cheap by rewinding owned state instead of recomputing the full
    feature set.
 
-MagnusChessX Thinking already follows the same broad direction for MNUEv2:
+MACE-Kraken-v1 already follows the same broad direction for MNUEv2:
 
 - changed squares and slider rays determine the Attack frontier;
 - semantic updates are lazy;
@@ -117,7 +117,7 @@ Incompatible without redesign:
 
 ## Implementation Guidance
 
-For MagnusChessX Thinking, improvements should preserve these constraints:
+For MACE-Kraken-v1, improvements should preserve these constraints:
 
 - feature encoders must match trainer output exactly;
 - scalar and SIMD paths must remain parity-checkable;
@@ -147,7 +147,7 @@ Areas to inspect in Reckless when re-deriving an idea:
 | selected head | how only the routed bucket is evaluated |
 | search integration | where evaluation state is refreshed and rewound |
 
-Areas to inspect in MagnusChessX Thinking before implementing:
+Areas to inspect in MACE-Kraken-v1 before implementing:
 
 | Area | What To Preserve |
 |---|---|

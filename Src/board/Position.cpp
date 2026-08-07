@@ -47,6 +47,23 @@ constexpr u8 kMnuePhaseWeight[PIECE_NB] = {
     0, 1, 1, 2, 4, 0
 };
 
+[[nodiscard]] constexpr Bitboard rank_segment(
+    Square from,
+    Square to
+) noexcept {
+    if (from == to || rank_of(from) != rank_of(to))
+        return 0ULL;
+
+    const int step = to > from ? 1 : -1;
+    Bitboard result = 0ULL;
+    for (Square sq = from + step;; sq += step) {
+        result |= bb_of(sq);
+        if (sq == to)
+            break;
+    }
+    return result;
+}
+
 [[nodiscard]] inline bool tracks_material(PieceType piece_type) noexcept {
     return piece_type >= PAWN && piece_type <= QUEEN;
 }
@@ -128,12 +145,16 @@ void position_clear(Position& pos) noexcept {
     pos.side_to_move = WHITE;
     pos.ep_sq = NO_SQ;
     pos.castling_rights = 0;
+    pos.chess960 = false;
     pos.halfmove_clock = 0;
     pos.fullmove_number = 1;
     pos.plies_from_null = 0;
 
     pos.king_sq[WHITE] = NO_SQ;
     pos.king_sq[BLACK] = NO_SQ;
+    pos.castling_rights_mask.fill(0);
+    pos.castling_rook_square.fill(NO_SQ);
+    pos.castling_path.fill(0ULL);
 
     pos.color_bb[WHITE] = 0ULL;
     pos.color_bb[BLACK] = 0ULL;
@@ -157,12 +178,16 @@ void position_copy_without_accumulators(Position& dst, const Position& src) noex
     dst.side_to_move = src.side_to_move;
     dst.ep_sq = src.ep_sq;
     dst.castling_rights = src.castling_rights;
+    dst.chess960 = src.chess960;
     dst.halfmove_clock = src.halfmove_clock;
     dst.fullmove_number = src.fullmove_number;
     dst.plies_from_null = src.plies_from_null;
 
     dst.king_sq[WHITE] = src.king_sq[WHITE];
     dst.king_sq[BLACK] = src.king_sq[BLACK];
+    dst.castling_rights_mask = src.castling_rights_mask;
+    dst.castling_rook_square = src.castling_rook_square;
+    dst.castling_path = src.castling_path;
     dst.color_bb[WHITE] = src.color_bb[WHITE];
     dst.color_bb[BLACK] = src.color_bb[BLACK];
     for (int pt = 0; pt < PIECE_NB; ++pt)
@@ -226,6 +251,44 @@ Key position_compute_key(const Position& pos, const Tables& tables) noexcept {
 
 void position_refresh_key(Position& pos, const Tables& tables) noexcept {
     pos.key = position_compute_key(pos, tables);
+}
+
+bool position_set_castling_right(
+    Position& pos,
+    Color color,
+    Square rook_from
+) noexcept {
+    if ((color != WHITE && color != BLACK) || !is_ok(rook_from))
+        return false;
+
+    const Square king_from = pos.king_sq[color];
+    const int home_rank = color == WHITE ? 0 : 7;
+    if (!is_ok(king_from) || rank_of(king_from) != home_rank ||
+        rank_of(rook_from) != home_rank || king_from == rook_from ||
+        piece_on(pos, king_from) != make_piece(color, KING) ||
+        piece_on(pos, rook_from) != make_piece(color, ROOK)) {
+        return false;
+    }
+
+    const bool king_side = rook_from > king_from;
+    const int right = color == WHITE
+        ? (king_side ? WHITE_OO : WHITE_OOO)
+        : (king_side ? BLACK_OO : BLACK_OOO);
+    if ((pos.castling_rights & right) != 0)
+        return false;
+
+    const u16 flag = king_side ? MOVE_OO : MOVE_OOO;
+    const Square king_to = castling_king_to(color, flag);
+    const Square rook_to = castling_rook_to(color, flag);
+
+    pos.castling_rights |= right;
+    pos.castling_rights_mask[king_from] |= static_cast<u8>(right);
+    pos.castling_rights_mask[rook_from] |= static_cast<u8>(right);
+    pos.castling_rook_square[right] = rook_from;
+    pos.castling_path[right] =
+        (rank_segment(king_from, king_to) | rank_segment(rook_from, rook_to)) &
+        ~(bb_of(king_from) | bb_of(rook_from));
+    return true;
 }
 
 void position_put_piece(
@@ -314,13 +377,8 @@ inline void clear_castling_rights_by_square(
     Position& pos,
     Square sq
 ) noexcept {
-    switch (sq) {
-        case 0:  pos.castling_rights &= ~WHITE_OOO; break;
-        case 7:  pos.castling_rights &= ~WHITE_OO;  break;
-        case 56: pos.castling_rights &= ~BLACK_OOO; break;
-        case 63: pos.castling_rights &= ~BLACK_OO;  break;
-        default: break;
-    }
+    if (is_ok(sq))
+        pos.castling_rights &= ~static_cast<int>(pos.castling_rights_mask[sq]);
 }
 
 inline void remove_piece_at(Position& pos, Square sq) noexcept {
@@ -368,6 +426,58 @@ inline void put_piece_with_key(
 ) noexcept {
     key_xor_piece(pos, tables, color, piece_type, sq);
     position_put_piece(pos, color, piece_type, sq);
+}
+
+inline void do_castling_unkeyed(
+    Position& pos,
+    Color color,
+    Square king_from,
+    Square rook_from,
+    u16 flag
+) noexcept {
+    const Square king_to = castling_king_to(color, flag);
+    const Square rook_to = castling_rook_to(color, flag);
+
+    // Remove both starting pieces before placing either destination piece.
+    // Chess960 permits every useful overlap except the two pieces sharing one
+    // square at the same time (including king/rook swaps and stationary pieces).
+    position_remove_piece(pos, color, KING, king_from);
+    position_remove_piece(pos, color, ROOK, rook_from);
+    position_put_piece(pos, color, KING, king_to);
+    position_put_piece(pos, color, ROOK, rook_to);
+}
+
+inline void undo_castling_unkeyed(
+    Position& pos,
+    Color color,
+    Square king_from,
+    Square rook_from,
+    u16 flag
+) noexcept {
+    const Square king_to = castling_king_to(color, flag);
+    const Square rook_to = castling_rook_to(color, flag);
+
+    position_remove_piece(pos, color, KING, king_to);
+    position_remove_piece(pos, color, ROOK, rook_to);
+    position_put_piece(pos, color, KING, king_from);
+    position_put_piece(pos, color, ROOK, rook_from);
+}
+
+inline void do_castling_with_key(
+    Position& pos,
+    const Tables& tables,
+    Color color,
+    Square king_from,
+    Square rook_from,
+    u16 flag
+) noexcept {
+    const Square king_to = castling_king_to(color, flag);
+    const Square rook_to = castling_rook_to(color, flag);
+    key_xor_piece(pos, tables, color, KING, king_from);
+    key_xor_piece(pos, tables, color, KING, king_to);
+    key_xor_piece(pos, tables, color, ROOK, rook_from);
+    key_xor_piece(pos, tables, color, ROOK, rook_to);
+    do_castling_unkeyed(pos, color, king_from, rook_from, flag);
 }
 
 } // namespace
@@ -418,22 +528,8 @@ void make_move(
             pos.castling_rights &= ~(BLACK_OO | BLACK_OOO);
     }
 
-    if (flag == MOVE_OO) {
-        if (us == WHITE) {
-            move_piece_with_key(pos, tables, WHITE, KING, 4, 6);
-            move_piece_with_key(pos, tables, WHITE, ROOK, 7, 5);
-        } else {
-            move_piece_with_key(pos, tables, BLACK, KING, 60, 62);
-            move_piece_with_key(pos, tables, BLACK, ROOK, 63, 61);
-        }
-    } else if (flag == MOVE_OOO) {
-        if (us == WHITE) {
-            move_piece_with_key(pos, tables, WHITE, KING, 4, 2);
-            move_piece_with_key(pos, tables, WHITE, ROOK, 0, 3);
-        } else {
-            move_piece_with_key(pos, tables, BLACK, KING, 60, 58);
-            move_piece_with_key(pos, tables, BLACK, ROOK, 56, 59);
-        }
+    if (move_is_castle(move)) {
+        do_castling_with_key(pos, tables, us, from, to, flag);
     } else if (flag == MOVE_EP) {
         const Square captured_sq = us == WHITE ? to - 8 : to + 8;
         state.captured_sq = captured_sq;
@@ -483,22 +579,8 @@ void unmake_move(
     const Square to = to_sq(move);
     const u16 flag = move_flag(move);
 
-    if (flag == MOVE_OO) {
-        if (us == WHITE) {
-            position_move_piece(pos, WHITE, KING, 6, 4);
-            position_move_piece(pos, WHITE, ROOK, 5, 7);
-        } else {
-            position_move_piece(pos, BLACK, KING, 62, 60);
-            position_move_piece(pos, BLACK, ROOK, 61, 63);
-        }
-    } else if (flag == MOVE_OOO) {
-        if (us == WHITE) {
-            position_move_piece(pos, WHITE, KING, 2, 4);
-            position_move_piece(pos, WHITE, ROOK, 3, 0);
-        } else {
-            position_move_piece(pos, BLACK, KING, 58, 60);
-            position_move_piece(pos, BLACK, ROOK, 59, 56);
-        }
+    if (move_is_castle(move)) {
+        undo_castling_unkeyed(pos, us, from, to, flag);
     } else if (flag == MOVE_EP) {
         position_move_piece(pos, us, PAWN, to, from);
 
@@ -610,22 +692,8 @@ void do_move_copy(Position& pos, Move move) noexcept {
             pos.castling_rights &= ~(BLACK_OO | BLACK_OOO);
     }
 
-    if (flag == MOVE_OO) {
-        if (us == WHITE) {
-            position_move_piece(pos, WHITE, KING, 4, 6);
-            position_move_piece(pos, WHITE, ROOK, 7, 5);
-        } else {
-            position_move_piece(pos, BLACK, KING, 60, 62);
-            position_move_piece(pos, BLACK, ROOK, 63, 61);
-        }
-    } else if (flag == MOVE_OOO) {
-        if (us == WHITE) {
-            position_move_piece(pos, WHITE, KING, 4, 2);
-            position_move_piece(pos, WHITE, ROOK, 0, 3);
-        } else {
-            position_move_piece(pos, BLACK, KING, 60, 58);
-            position_move_piece(pos, BLACK, ROOK, 56, 59);
-        }
+    if (move_is_castle(move)) {
+        do_castling_unkeyed(pos, us, from, to, flag);
     } else if (flag == MOVE_EP) {
         const Square captured_sq = us == WHITE ? to - 8 : to + 8;
         remove_piece_at(pos, captured_sq);

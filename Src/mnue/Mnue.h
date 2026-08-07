@@ -76,6 +76,22 @@ struct P2K32Layout {
     static constexpr int ArchId = 2;
 };
 
+// MNUE-P2-H32: horizontally canonical hybrid king network.
+//   coarse: 10240 x 768, fine: 22528 x 256, head: 64 x 2048.
+struct P2H32Layout {
+    static constexpr int CoarseInputBuckets = 16;
+    static constexpr int FineInputBuckets = 32;
+    static constexpr int InputBuckets = FineInputBuckets;
+    static constexpr int OutputBuckets = 64;
+    static constexpr int CoarseInputSize = 10240;
+    static constexpr int FineInputSize = 22528;
+    static constexpr int InputSize = CoarseInputSize + FineInputSize;
+    static constexpr int CoarseHiddenSize = 768;
+    static constexpr int FineHiddenSize = 256;
+    static constexpr int HiddenSize = CoarseHiddenSize + FineHiddenSize;
+    static constexpr int ArchId = 9;
+};
+
 // MNUE-P2Pro: wider P2-compatible fast filter net.
 //   1 x 32 x 16 x 1408 x 10240
 //   output_buckets x input_buckets x hidden x input_features.
@@ -106,13 +122,15 @@ struct P4Layout {
 
 static_assert(P2Layout::InputSize == 10240);
 static_assert(P2K32Layout::InputSize == 20480);
+static_assert(P2H32Layout::InputSize == 32768);
+static_assert(P2H32Layout::HiddenSize == 1024);
 static_assert(P2ProLayout::InputSize == 10240);
 static_assert(P4Layout::InputSize == 20480);
 
 // Embedded P2/P2-K32/P2Pro network filename - driven by Makefile -D, with a fallback
 // for builds that do not go through the Makefile.
 #ifndef MNUE_EMBEDDED_FILENAME
-#define MNUE_EMBEDDED_FILENAME "mm-4ac81907e.MNUE"
+#define MNUE_EMBEDDED_FILENAME "mace-kraken-v1-p2h32-s8011M-o3183M-c+frc.mnue"
 #endif
 inline constexpr const char* kEmbeddedP2Filename = MNUE_EMBEDDED_FILENAME;
 

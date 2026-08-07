@@ -3083,7 +3083,14 @@ struct SemanticState {
                 frame.changed_squares[frame.changed_count++] = square;
         };
         add_changed(from_sq(move));
-        add_changed(to_sq(move));
+        if (move_is_castle(move)) {
+            const Color color = static_cast<Color>(pos.side_to_move);
+            add_changed(castling_king_to(color, move_flag(move)));
+            add_changed(to_sq(move));
+            add_changed(castling_rook_to(color, move_flag(move)));
+        } else {
+            add_changed(to_sq(move));
+        }
         if (move_is_ep(move)) {
             const Square captured =
                 pos.side_to_move == WHITE
@@ -3093,16 +3100,6 @@ struct SemanticState {
             add_changed(captured);
         } else if (move_is_capture(move)) {
             frame.captured_piece = piece_on(pos, to_sq(move));
-        }
-        if (move_is_castle(move)) {
-            const Square king_from = from_sq(move);
-            const bool king_side = to_sq(move) > king_from;
-            add_changed(
-                king_side ? king_from + 3 : king_from - 4
-            );
-            add_changed(
-                king_side ? king_from + 1 : king_from - 1
-            );
         }
         for (int perspective = WHITE;
              perspective <= BLACK;

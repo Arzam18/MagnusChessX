@@ -1,4 +1,4 @@
-# MagnusChessX Thinking MNUEv2 Engine Support
+# MACE-Kraken-v1 MNUEv2 Engine Support
 
 The canonical training and binary-format description is
 [MNUE_V2_FORMAT.md](MNUE_V2_FORMAT.md). Engine constants must match
@@ -7,7 +7,7 @@ The canonical training and binary-format description is
 
 ## Architecture Dispatch
 
-MagnusChessX Thinking keeps the legacy MNUE P2/P2Pro loader and evaluator. The
+MACE-Kraken-v1 keeps the legacy MNUE P2/P2Pro loader and evaluator. The
 `MNUEfile` option probes the first bytes of the selected file:
 
 - legacy files are passed to the P2/P2Pro loader;

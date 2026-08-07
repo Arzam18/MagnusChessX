@@ -63,7 +63,7 @@ constexpr int MAX_TOP_HISTORY_QUIETS = 8;
 MovePicker::MovePicker(
     Position& pos,
     const memory::Memory& mem,
-    const GenInfo& info,
+    GenInfo& info,
     const HistoryTables& history,
     Move tt_move,
     int ply,
@@ -193,6 +193,8 @@ void MovePicker::prepare_tt_move() noexcept {
     tt_legal_ = true;
     tt_ready_ = true;
     if (move_is_capture(tt_move_)) {
+        if constexpr (SearchComponents::threat_capture_history)
+            capture_history_threats(info_, pos_, mem_);
         tt_see_value_ = search::see_value_fast(pos_, mem_, tt_move_);
         tt_bad_capture_ = tt_see_value_ < 0;
         tt_score_ = score_capture(tt_move_, tt_see_value_);
@@ -212,6 +214,10 @@ void MovePicker::build_capture_stage() noexcept {
     MoveList list;
     Move* end = generate_pseudo_captures_only(pos_, mem_, info_, list.moves);
     list.size = static_cast<int>(end - list.moves);
+    if constexpr (SearchComponents::threat_capture_history) {
+        if (list.size > 0)
+            capture_history_threats(info_, pos_, mem_);
+    }
 
     for (int i = 0; i < list.size; ++i) {
         const Move move = list.moves[i];
@@ -398,7 +404,9 @@ void MovePicker::add_quiet(
 
 int MovePicker::score_capture(Move move, int see_value) const noexcept {
     return mvv_lva_capture_term(pos_, move)
-        + history_.capture_ordering_score_fast(pos_, move, depth_, see_value);
+        + history_.capture_ordering_score_fast(
+            pos_, move, depth_, see_value, info_.capture_threats
+        );
 }
 
 int MovePicker::score_quiet(Move move) const noexcept {

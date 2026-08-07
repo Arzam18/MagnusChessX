@@ -38,6 +38,9 @@ namespace magnus {
     bits  0..5   : to
     bits  6..11  : from
     bits 12..15  : flag
+
+    Castling is encoded as king origin -> participating rook origin. The
+    MOVE_OO/MOVE_OOO flag selects the fixed Chess/Chess960 destination pair.
 */
 enum MoveFlag : u16 {
     MOVE_QUIET        = 0,
@@ -104,6 +107,22 @@ constexpr bool move_is_underpromotion(Move move) noexcept {
 constexpr bool move_is_castle(Move move) noexcept {
     const u16 flag = move_flag(move);
     return flag == MOVE_OO || flag == MOVE_OOO;
+}
+
+constexpr Square castling_king_to(Color color, u16 flag) noexcept {
+    const int rank_base = color == WHITE ? 0 : 56;
+    return rank_base + (flag == MOVE_OO ? 6 : 2);
+}
+
+constexpr Square castling_rook_to(Color color, u16 flag) noexcept {
+    const int rank_base = color == WHITE ? 0 : 56;
+    return rank_base + (flag == MOVE_OO ? 5 : 3);
+}
+
+constexpr int castling_right(Color color, u16 flag) noexcept {
+    if (color == WHITE)
+        return flag == MOVE_OO ? WHITE_OO : WHITE_OOO;
+    return flag == MOVE_OO ? BLACK_OO : BLACK_OOO;
 }
 
 constexpr bool move_is_ep(Move move) noexcept {
@@ -191,7 +210,10 @@ struct GenInfo {
     Bitboard checkers = 0ULL;
     Bitboard pinners = 0ULL;
     Bitboard pinned = 0ULL;
-    Bitboard danger = 0ULL;
+    // Lazily populated attack map used by threat-indexed capture history.
+    // It always describes the pre-move position and uses the full occupancy.
+    Bitboard capture_threats = 0ULL;
+    bool capture_threats_valid = false;
 
     Bitboard capture_mask = 0ULL;
     Bitboard push_mask = 0ULL;
@@ -249,6 +271,12 @@ Bitboard danger_bb(
 ) noexcept;
 
 void init_gen_info(
+    GenInfo& info,
+    const Position& pos,
+    const memory::Memory& mem
+) noexcept;
+
+Bitboard capture_history_threats(
     GenInfo& info,
     const Position& pos,
     const memory::Memory& mem

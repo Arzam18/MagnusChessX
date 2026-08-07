@@ -27,7 +27,7 @@ SOFTWARE.
 #include <cstdint>
 
 /*
- * Global Type Definitions — Foundation type system for MagnusChessX Thinking
+ * Global Type Definitions — Magnus Algorithm Chess Engine — Kraken
  *
  * All modules (move generation, search, evaluation, hashing) share the
  * scalar aliases, enumerations, and bit-operation helper functions defined here.
@@ -126,7 +126,8 @@ enum CastlingRight : int {
 
     WHITE_CASTLING = WHITE_OO | WHITE_OOO,   // All white castling
     BLACK_CASTLING = BLACK_OO | BLACK_OOO,   // All black castling
-    ANY_CASTLING   = WHITE_CASTLING | BLACK_CASTLING  // All castling
+    ANY_CASTLING   = WHITE_CASTLING | BLACK_CASTLING, // All castling
+    CASTLING_RIGHT_NB = 16
 };
 
 constexpr Square NO_SQ = -1;    // Represents "no square" (used when en-passant does not exist)
