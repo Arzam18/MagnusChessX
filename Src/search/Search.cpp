@@ -7535,9 +7535,12 @@ void emit_root_lines_info(
     SearchTimeSignals time_signals{};
     if (local_limits.use_time_management)
         local_limits.time_signals = &time_signals;
-    Searcher searcher(mem, session_state.worker(0), local_limits);
+    // Keep the large Searcher state off the Android search-thread stack.
+    auto searcher = std::make_unique<Searcher>(
+        mem, session_state.worker(0), local_limits
+    );
     IterativeWorkerResult result =
-        iterative_deepening_worker(searcher, root, out, search_start);
+        iterative_deepening_worker(*searcher, root, out, search_start);
     const int searched_pv_length = result.pv_length;
     extend_syzygy_pv(
         root,
@@ -7568,7 +7571,7 @@ void emit_root_lines_info(
                 *out,
                 mem,
                 root,
-                searcher,
+                *searcher,
                 result.lines,
                 static_cast<int>(result.lines.size()),
                 search_start,
@@ -7581,7 +7584,7 @@ void emit_root_lines_info(
                 *out,
                 mem,
                 root,
-                searcher,
+                *searcher,
                 result.best,
                 result.pv,
                 result.pv_length,
