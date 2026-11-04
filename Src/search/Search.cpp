@@ -7728,7 +7728,11 @@ void emit_root_lines_info(
         main_limits.root_msv = nullptr;
     }
 
-    Searcher main_searcher(mem, session_state.worker(0), main_limits);
+    // Searcher owns several large history/PV tables. Keep it off the Android
+    // pthread stack, which is substantially smaller than desktop stacks.
+    auto main_searcher = std::make_unique<Searcher>(
+        mem, session_state.worker(0), main_limits
+    );
     const int worker_count = main_limits.thread_count;
     std::vector<IterativeWorkerResult> results(static_cast<std::size_t>(worker_count));
     std::vector<std::unique_ptr<RootWorker>> helpers;
@@ -7764,7 +7768,7 @@ void emit_root_lines_info(
     }
 
     results[0] = iterative_deepening_worker(
-        main_searcher,
+        *main_searcher,
         root,
         out,
         search_start
@@ -7814,34 +7818,36 @@ void emit_root_lines_info(
         recovery_limits.root_msv = nullptr;
         recovery_limits.time_signals = nullptr;
 
-        Searcher recovery_searcher(mem, session_state.worker(0), recovery_limits);
-        recovery_searcher.p2_accumulator_stack.reset();
-        recovery_searcher.completed_depth = best.best.depth;
-        recovery_searcher.root_depth = best.best.depth;
+        auto recovery_searcher = std::make_unique<Searcher>(
+            mem, session_state.worker(0), recovery_limits
+        );
+        recovery_searcher->p2_accumulator_stack.reset();
+        recovery_searcher->completed_depth = best.best.depth;
+        recovery_searcher->root_depth = best.best.depth;
         reset_searcher_iteration(
-            recovery_searcher,
+            *recovery_searcher,
             timed_search ? search_start : Searcher::clock::now(),
             0
         );
         SearchResult recovered = best.best;
         const int score_before_recovery = recovered.score;
         const memory::Bound bound_before_recovery = best.score_bound;
-        (void)recovery_searcher.recover_ponder_pv_full_window(
+        (void)recovery_searcher->recover_ponder_pv_full_window(
             root,
             recovered,
             recovered.depth
         );
-        if (!recovery_searcher.stopped &&
-            recovery_searcher.pv_length[0] > 0 &&
-            recovery_searcher.pv_table[0][0] == recovered.best_move) {
-            recovery_searcher.publish_nodes();
-            recovery_searcher.publish_tb_hits();
+        if (!recovery_searcher->stopped &&
+            recovery_searcher->pv_length[0] > 0 &&
+            recovery_searcher->pv_table[0][0] == recovered.best_move) {
+            recovery_searcher->publish_nodes();
+            recovery_searcher->publish_tb_hits();
             if (main_limits.multipv > 1)
                 recovered.score = score_before_recovery;
             best.best = recovered;
-            best.pv_length = recovery_searcher.pv_length[0];
+            best.pv_length = recovery_searcher->pv_length[0];
             for (int i = 0; i < best.pv_length; ++i) {
-                best.pv[i] = recovery_searcher.pv_table[0][i];
+                best.pv[i] = recovery_searcher->pv_table[0][i];
                 best.best.pv[i] = best.pv[i];
             }
             best.best.pv_length = best.pv_length;
@@ -7891,7 +7897,7 @@ void emit_root_lines_info(
                 *out,
                 mem,
                 root,
-                main_searcher,
+                *main_searcher,
                 best.lines,
                 static_cast<int>(best.lines.size()),
                 search_start,
@@ -7904,7 +7910,7 @@ void emit_root_lines_info(
                 *out,
                 mem,
                 root,
-                main_searcher,
+                *main_searcher,
                 best.best,
                 best.pv,
                 best.pv_length,
