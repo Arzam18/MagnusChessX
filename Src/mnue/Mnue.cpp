@@ -36,7 +36,11 @@ SOFTWARE.
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#if defined(__AVX2__) || defined(__AVX512F__)
 #include <immintrin.h>
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 #include <limits>
 #include <ostream>
 #include <string>
@@ -1048,6 +1052,32 @@ inline void sub_feature_vector_avx2(
 
 #endif
 
+#if defined(__aarch64__) && defined(__ARM_NEON)
+template<class Layout>
+inline void add_feature_vector_neon(
+    std::array<i16, Layout::HiddenSize>& acc,
+    const i16* weights
+) noexcept {
+    for (int i = 0; i < Layout::HiddenSize; i += 8) {
+        const int16x8_t a = vld1q_s16(acc.data() + i);
+        const int16x8_t b = vld1q_s16(weights + i);
+        vst1q_s16(acc.data() + i, vaddq_s16(a, b));
+    }
+}
+
+template<class Layout>
+inline void sub_feature_vector_neon(
+    std::array<i16, Layout::HiddenSize>& acc,
+    const i16* weights
+) noexcept {
+    for (int i = 0; i < Layout::HiddenSize; i += 8) {
+        const int16x8_t a = vld1q_s16(acc.data() + i);
+        const int16x8_t b = vld1q_s16(weights + i);
+        vst1q_s16(acc.data() + i, vsubq_s16(a, b));
+    }
+}
+#endif
+
 template<class Layout>
 void add_feature(
     Accumulator<Layout>& acc,
@@ -1057,6 +1087,8 @@ void add_feature(
     const i16* w = net.w0.data() + static_cast<std::size_t>(idx) * Layout::HiddenSize;
 #if defined(__AVX2__)
     add_feature_vector_avx2<Layout>(acc, w);
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+    add_feature_vector_neon<Layout>(acc, w);
 #else
     for (int i = 0; i < Layout::HiddenSize; ++i)
         acc[static_cast<std::size_t>(i)] = static_cast<i16>(
@@ -1075,6 +1107,8 @@ void sub_feature(
     const i16* w = net.w0.data() + static_cast<std::size_t>(idx) * Layout::HiddenSize;
 #if defined(__AVX2__)
     sub_feature_vector_avx2<Layout>(acc, w);
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+    sub_feature_vector_neon<Layout>(acc, w);
 #else
     for (int i = 0; i < Layout::HiddenSize; ++i)
         acc[static_cast<std::size_t>(i)] = static_cast<i16>(
@@ -1152,6 +1186,19 @@ void apply_p2_diff(
         case 0x9: apply.template operator()<2, 1>(); break;
         case 0xA: apply.template operator()<2, 2>(); break;
         default:  assert(false); break;
+    }
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+    for (int i = 0; i < Layout::HiddenSize; i += 8) {
+        int16x8_t value = vld1q_s16(src.data() + i);
+        if (add0 != nullptr)
+            value = vaddq_s16(value, vld1q_s16(add0 + i));
+        if (add1 != nullptr)
+            value = vaddq_s16(value, vld1q_s16(add1 + i));
+        if (sub0 != nullptr)
+            value = vsubq_s16(value, vld1q_s16(sub0 + i));
+        if (sub1 != nullptr)
+            value = vsubq_s16(value, vld1q_s16(sub1 + i));
+        vst1q_s16(dst.data() + i, value);
     }
 #else
     for (int i = 0; i < Layout::HiddenSize; ++i) {
@@ -1317,6 +1364,14 @@ void h32_apply_segment(
             ? _mm256_add_epi16(a, w)
             : _mm256_sub_epi16(a, w);
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst), value);
+    }
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+    static_assert(Width % 8 == 0);
+    for (int i = 0; i < Width; i += 8) {
+        i16* dst = acc.data() + Offset + i;
+        const int16x8_t a = vld1q_s16(dst);
+        const int16x8_t w = vld1q_s16(weights + i);
+        vst1q_s16(dst, add ? vaddq_s16(a, w) : vsubq_s16(a, w));
     }
 #else
     for (int i = 0; i < Width; ++i) {
@@ -1537,6 +1592,20 @@ void apply_h32_diff_segment(
             reinterpret_cast<__m256i*>(dst.data() + Offset + i),
             value
         );
+    }
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+    static_assert(Width % 8 == 0);
+    for (int i = 0; i < Width; i += 8) {
+        int16x8_t value = vld1q_s16(src.data() + Offset + i);
+        if (add0 != nullptr)
+            value = vaddq_s16(value, vld1q_s16(add0 + i));
+        if (add1 != nullptr)
+            value = vaddq_s16(value, vld1q_s16(add1 + i));
+        if (sub0 != nullptr)
+            value = vsubq_s16(value, vld1q_s16(sub0 + i));
+        if (sub1 != nullptr)
+            value = vsubq_s16(value, vld1q_s16(sub1 + i));
+        vst1q_s16(dst.data() + Offset + i, value);
     }
 #else
     for (int i = 0; i < Width; ++i) {
@@ -2260,6 +2329,132 @@ inline void screlu_square_bytes_avx2(
 
     return total;
 }
+
+#endif
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+[[nodiscard]] inline i64 horizontal_sum_i64x4_neon(int64x2_t low, int64x2_t high) noexcept {
+    return vaddvq_s64(vaddq_s64(low, high));
+}
+
+// Exact signed 16-bit output-weight path. Activations are clipped to [0,255],
+// squared in unsigned 16-bit lanes, then widened before multiplication so no
+// intermediate 16-bit or 32-bit overflow can change the NNUE result.
+[[nodiscard]] i64 dot_screlu_i16_neon(
+    const i16* acc,
+    const i16* weights,
+    int count
+) noexcept {
+    const int16x4_t zero = vdup_n_s16(0);
+    const int16x4_t clip = vdup_n_s16(static_cast<i16>(kClip));
+    int64x2_t sum_low = vdupq_n_s64(0);
+    int64x2_t sum_high = vdupq_n_s64(0);
+
+    for (int i = 0; i < count; i += 4) {
+        const int16x4_t raw = vld1_s16(acc + i);
+        const int16x4_t clipped = vmin_s16(vmax_s16(raw, zero), clip);
+        const uint16x4_t clipped_u = vreinterpret_u16_s16(clipped);
+        const uint16x4_t square = vmul_u16(clipped_u, clipped_u);
+        const int32x4_t square32 = vreinterpretq_s32_u32(vmovl_u16(square));
+        const int32x4_t weight32 = vmovl_s16(vld1_s16(weights + i));
+        const int32x4_t product = vmulq_s32(square32, weight32);
+
+        sum_low = vaddq_s64(sum_low, vmovl_s32(vget_low_s32(product)));
+        sum_high = vaddq_s64(sum_high, vmovl_s32(vget_high_s32(product)));
+    }
+
+    return horizontal_sum_i64x4_neon(sum_low, sum_high);
+}
+
+[[nodiscard]] i64 dot_pair_screlu_i16_neon(
+    const i16* acc0,
+    const i16* weights0,
+    const i16* acc1,
+    const i16* weights1,
+    int count
+) noexcept {
+    return dot_screlu_i16_neon(acc0, weights0, count)
+        + dot_screlu_i16_neon(acc1, weights1, count);
+}
+#endif
+
+#if defined(__aarch64__) && defined(__ARM_FEATURE_DOTPROD)
+// Dot-product path for networks whose complete output matrix is signed-i8 safe.
+// Each squared activation is uint16. Split it into low/high bytes, center each
+// byte by 128 to make it signed, and restore the offset using a dot of ones.
+// This is exact: x = (lo - 128 + 128) + 256 * (hi - 128 + 128).
+[[nodiscard]] i64 dot_screlu_i8_dotprod(
+    const i16* acc,
+    const std::int8_t* weights,
+    int count
+) noexcept {
+    const int16x8_t zero16 = vdupq_n_s16(0);
+    const int16x8_t clip16 = vdupq_n_s16(static_cast<i16>(kClip));
+    const int8x16_t ones = vdupq_n_s8(1);
+    const int32x4_t zero32 = vdupq_n_s32(0);
+    const uint8x16_t byte_bias = vdupq_n_u8(128);
+
+    int64x2_t total_low = vdupq_n_s64(0);
+    int64x2_t total_high = vdupq_n_s64(0);
+
+    for (int i = 0; i < count; i += 16) {
+        const int16x8_t raw0 = vld1q_s16(acc + i);
+        const int16x8_t raw1 = vld1q_s16(acc + i + 8);
+        const int16x8_t clipped0 = vminq_s16(vmaxq_s16(raw0, zero16), clip16);
+        const int16x8_t clipped1 = vminq_s16(vmaxq_s16(raw1, zero16), clip16);
+        const uint16x8_t c0 = vreinterpretq_u16_s16(clipped0);
+        const uint16x8_t c1 = vreinterpretq_u16_s16(clipped1);
+        const uint16x8_t square0 = vmulq_u16(c0, c0);
+        const uint16x8_t square1 = vmulq_u16(c1, c1);
+
+        const uint8x16_t low_bytes = vcombine_u8(
+            vmovn_u16(square0),
+            vmovn_u16(square1)
+        );
+        const uint8x16_t high_bytes = vcombine_u8(
+            vshrn_n_u16(square0, 8),
+            vshrn_n_u16(square1, 8)
+        );
+        const int8x16_t low_centered =
+            vreinterpretq_s8_u8(vsubq_u8(low_bytes, byte_bias));
+        const int8x16_t high_centered =
+            vreinterpretq_s8_u8(vsubq_u8(high_bytes, byte_bias));
+        const int8x16_t weight_vec = vld1q_s8(weights + i);
+
+        const int32x4_t weight_sum = vdotq_s32(zero32, ones, weight_vec);
+        int32x4_t low_dot = vdotq_s32(zero32, low_centered, weight_vec);
+        int32x4_t high_dot = vdotq_s32(zero32, high_centered, weight_vec);
+
+        low_dot = vmlaq_n_s32(low_dot, weight_sum, 128);
+        high_dot = vmlaq_n_s32(high_dot, weight_sum, 128);
+        const int32x4_t contribution =
+            vmlaq_n_s32(low_dot, high_dot, 256);
+
+        // Widen each 16-element block immediately. This avoids accumulating
+        // more than 32-bit range even for the wider P2-Pro layout.
+        total_low = vaddq_s64(
+            total_low,
+            vmovl_s32(vget_low_s32(contribution))
+        );
+        total_high = vaddq_s64(
+            total_high,
+            vmovl_s32(vget_high_s32(contribution))
+        );
+    }
+
+    return horizontal_sum_i64x4_neon(total_low, total_high);
+}
+
+[[nodiscard]] i64 dot_pair_screlu_i8_dotprod(
+    const i16* acc0,
+    const std::int8_t* weights0,
+    const i16* acc1,
+    const std::int8_t* weights1,
+    int count
+) noexcept {
+    return dot_screlu_i8_dotprod(acc0, weights0, count)
+        + dot_screlu_i8_dotprod(acc1, weights1, count);
+}
 #endif
 
 template<class Layout, class Net>
@@ -2331,6 +2526,28 @@ template<class Layout, class Net>
         output += dot_screlu_i16_avx2(stm_acc.data(), w_stm, Layout::HiddenSize);
         output += dot_screlu_i16_avx2(nstm_acc.data(), w_nstm, Layout::HiddenSize);
     }
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_DOTPROD)
+    if (net.forward_vnni_safe && net.w1_i8.size() == net.w1.size()) {
+        const std::int8_t* w_stm_i8 = net.w1_i8.data() + base;
+        const std::int8_t* w_nstm_i8 = w_stm_i8 + Layout::HiddenSize;
+        output += dot_pair_screlu_i8_dotprod(
+            stm_acc.data(), w_stm_i8,
+            nstm_acc.data(), w_nstm_i8,
+            Layout::HiddenSize
+        );
+    } else {
+        output += dot_pair_screlu_i16_neon(
+            stm_acc.data(), w_stm,
+            nstm_acc.data(), w_nstm,
+            Layout::HiddenSize
+        );
+    }
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+    output += dot_pair_screlu_i16_neon(
+        stm_acc.data(), w_stm,
+        nstm_acc.data(), w_nstm,
+        Layout::HiddenSize
+    );
 #else
     for (int i = 0; i < Layout::HiddenSize; ++i)
         output += static_cast<i64>(screlu(stm_acc[static_cast<std::size_t>(i)]))
@@ -3275,6 +3492,10 @@ const char* eval_simd_name() noexcept {
     return "AVX-512BW";
 #elif defined(__AVX2__)
     return "AVX2";
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_DOTPROD)
+    return p2_vnni_forward_enabled() ? "ARM-Dotprod-SCRELU-exact" : "ARM-NEON-fallback";
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+    return "ARM-NEON";
 #else
     return "scalar";
 #endif
