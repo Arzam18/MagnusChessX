@@ -26,6 +26,7 @@ SOFTWARE.
 
 #include <bit>
 #include <cstring>
+#include <type_traits>
 
 /*
 The TT implementation focuses on a cheap probe path: compare four 32-bit tags
@@ -41,12 +42,30 @@ namespace {
     return static_cast<u32>(key >> 32);
 }
 
+// Use compiler atomic builtins rather than std::atomic_ref. Android NDK
+// libc++ versions used for API 24 do not consistently expose atomic_ref,
+// while Clang and GCC both provide these builtins for the integral TT fields.
+[[nodiscard]] inline constexpr int tt_builtin_memory_order(
+    std::memory_order order
+) noexcept {
+    switch (order) {
+        case std::memory_order_relaxed: return __ATOMIC_RELAXED;
+        case std::memory_order_consume: return __ATOMIC_CONSUME;
+        case std::memory_order_acquire: return __ATOMIC_ACQUIRE;
+        case std::memory_order_release: return __ATOMIC_RELEASE;
+        case std::memory_order_acq_rel: return __ATOMIC_ACQ_REL;
+        case std::memory_order_seq_cst: return __ATOMIC_SEQ_CST;
+    }
+    return __ATOMIC_SEQ_CST;
+}
+
 template <typename T>
 [[nodiscard]] inline T tt_atomic_load(
     const T& value,
     std::memory_order order = std::memory_order_relaxed
 ) noexcept {
-    return std::atomic_ref<T>(const_cast<T&>(value)).load(order);
+    static_assert(std::is_integral_v<T>, "TT atomic fields must be integral types");
+    return __atomic_load_n(&value, tt_builtin_memory_order(order));
 }
 
 template <typename T>
@@ -55,7 +74,8 @@ inline void tt_atomic_store(
     T desired,
     std::memory_order order = std::memory_order_relaxed
 ) noexcept {
-    std::atomic_ref<T>(value).store(desired, order);
+    static_assert(std::is_integral_v<T>, "TT atomic fields must be integral types");
+    __atomic_store_n(&value, desired, tt_builtin_memory_order(order));
 }
 
 [[nodiscard]] inline int lane_mask4_eq_u32_sse(const u32* ptr, u32 tag32) noexcept {
