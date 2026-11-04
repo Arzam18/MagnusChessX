@@ -1,0 +1,192 @@
+name: Build MACE-Kraken-v1 for Android ARM64 NEON + Dotprod
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Src/**'
+      - 'Vendor/fathom/**'
+      - '.github/workflows/android.yml'
+  pull_request:
+    paths:
+      - 'Src/**'
+      - 'Vendor/fathom/**'
+      - '.github/workflows/android.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Android ARM64 NEON + Dotprod
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android NDK r27c
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NDK_VERSION="27.2.12479018"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+
+          if [ -z "$SDK_ROOT" ]; then
+            echo "ERROR: Android SDK root was not provided by setup-android"
+            exit 1
+          fi
+
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
+            -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager was not found under $SDK_ROOT/cmdline-tools"
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install "ndk;${NDK_VERSION}"
+
+          NDK_HOME="$SDK_ROOT/ndk/$NDK_VERSION"
+          TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          test -x "$TOOLCHAIN/aarch64-linux-android24-clang++"
+          test -x "$TOOLCHAIN/aarch64-linux-android24-clang"
+
+          {
+            echo "ANDROID_NDK_HOME=$NDK_HOME"
+            echo "ANDROID_NDK_ROOT=$NDK_HOME"
+            echo "ANDROID_CXX=$TOOLCHAIN/aarch64-linux-android24-clang++"
+            echo "ANDROID_CC=$TOOLCHAIN/aarch64-linux-android24-clang"
+            echo "ANDROID_LLVM_OBJDUMP=$TOOLCHAIN/llvm-objdump"
+          } >> "$GITHUB_ENV"
+
+          "$TOOLCHAIN/aarch64-linux-android24-clang++" --version
+          "$TOOLCHAIN/aarch64-linux-android24-clang++" -dumpmachine
+
+      - name: Verify ARM64 target features
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "$ANDROID_CXX" -march=armv8-a+simd -dM -E -x c++ - \
+            > /tmp/mace-neon-macros.txt
+          "$ANDROID_CXX" -march=armv8.2-a+dotprod -dM -E -x c++ - \
+            > /tmp/mace-dotprod-macros.txt
+
+          grep -q '__aarch64__' /tmp/mace-neon-macros.txt
+          grep -q '__ARM_NEON' /tmp/mace-neon-macros.txt
+          grep -q '__ARM_FEATURE_DOTPROD' /tmp/mace-dotprod-macros.txt
+
+          echo "AArch64, NEON, and Dotprod compiler features verified."
+
+      - name: Build NEON baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          make -C Src -j2 \
+            BUILD_PROFILE=android-neon \
+            PGO=0 \
+            CXX="$ANDROID_CXX" \
+            CC="$ANDROID_CC"
+
+          mkdir -p dist
+          cp Src/build/MACE-Kraken-v1-android-neon \
+            dist/mace-kraken-v1-android-arm64-neon
+
+      - name: Verify embedded MNUE network
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NETWORK="Src/build/mace-kraken-v1-p2h32-s8011M-o3183M-c+frc.mnue"
+          EXPECTED_BYTES="27527336"
+
+          test -s "$NETWORK"
+          ACTUAL_BYTES="$(stat -c '%s' "$NETWORK")"
+
+          echo "Embedded network: $NETWORK"
+          echo "Network bytes: $ACTUAL_BYTES"
+
+          if [ "$ACTUAL_BYTES" != "$EXPECTED_BYTES" ]; then
+            echo "ERROR: Embedded P2-H32 network has an unexpected size."
+            echo "Expected: $EXPECTED_BYTES"
+            echo "Actual:   $ACTUAL_BYTES"
+            exit 1
+          fi
+
+      - name: Build Dotprod
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          make -C Src -j2 \
+            BUILD_PROFILE=android-dotprod \
+            PGO=0 \
+            CXX="$ANDROID_CXX" \
+            CC="$ANDROID_CC"
+
+          cp Src/build/MACE-Kraken-v1-android-dotprod \
+            dist/mace-kraken-v1-android-arm64-dotprod
+
+      - name: Verify Android executables
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for BIN in \
+            dist/mace-kraken-v1-android-arm64-neon \
+            dist/mace-kraken-v1-android-arm64-dotprod
+          do
+            echo "===== $BIN ====="
+            test -s "$BIN"
+            file "$BIN"
+            readelf -h "$BIN" > /tmp/mace-elf-header.txt
+            cat /tmp/mace-elf-header.txt
+            grep -q 'AArch64' /tmp/mace-elf-header.txt
+
+            readelf -d "$BIN" > /tmp/mace-dynamic.txt
+            if grep -q 'libc++_shared.so' /tmp/mace-dynamic.txt; then
+              echo "ERROR: Unexpected libc++_shared.so dependency"
+              cat /tmp/mace-dynamic.txt
+              exit 1
+            fi
+          done
+
+      - name: Verify Dotprod SDOT instructions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BIN="dist/mace-kraken-v1-android-arm64-dotprod"
+          DISASM="dist/mace-kraken-v1-android-arm64-dotprod.disasm"
+
+          "$ANDROID_LLVM_OBJDUMP" \
+            --disassemble \
+            --mattr=+dotprod \
+            "$BIN" > "$DISASM"
+
+          if ! grep -Eiq '(^|[[:space:]])sdot[[:space:]]' "$DISASM"; then
+            echo "ERROR: Dotprod binary does not contain SDOT instructions."
+            grep -Ein 'dot|s[du]ot' "$DISASM" | head -n 80 || true
+            exit 1
+          fi
+
+          echo "SDOT instruction found in the Dotprod executable."
+
+      - name: Upload Android ARM64 binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: mace-kraken-v1-android-arm64-neon-dotprod
+          path: |
+            dist/mace-kraken-v1-android-arm64-neon
+            dist/mace-kraken-v1-android-arm64-dotprod
+          if-no-files-found: error
