@@ -108,18 +108,23 @@ jobs:
           set -euo pipefail
 
           NETWORK="Src/build/mace-kraken-v1-p2h32-s8011M-o3183M-c+frc.mnue"
-          EXPECTED_BYTES="27527336"
+          # The published P2-H32 .mnue is a headerless raw payload.
+          # Mnue.cpp explicitly accepts this size via h32_payload_bytes().
+          # h32_file_bytes() is 40 bytes larger because it includes FileHeader.
+          EXPECTED_PAYLOAD_BYTES="27527296"
 
           test -s "$NETWORK"
           ACTUAL_BYTES="$(stat -c '%s' "$NETWORK")"
 
           echo "Embedded network: $NETWORK"
-          echo "Network bytes: $ACTUAL_BYTES"
+          echo "Network payload bytes: $ACTUAL_BYTES"
+          echo "Expected headerless payload bytes: $EXPECTED_PAYLOAD_BYTES"
 
-          if [ "$ACTUAL_BYTES" != "$EXPECTED_BYTES" ]; then
-            echo "ERROR: Embedded P2-H32 network has an unexpected size."
-            echo "Expected: $EXPECTED_BYTES"
-            echo "Actual:   $ACTUAL_BYTES"
+          if [ "$ACTUAL_BYTES" != "$EXPECTED_PAYLOAD_BYTES" ]; then
+            echo "ERROR: Embedded P2-H32 payload has an unexpected size."
+            echo "The published network is headerless; a 40-byte header is not included."
+            echo "Expected payload: $EXPECTED_PAYLOAD_BYTES"
+            echo "Actual payload:   $ACTUAL_BYTES"
             exit 1
           fi
 
