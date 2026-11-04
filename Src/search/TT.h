@@ -29,7 +29,9 @@ SOFTWARE.
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 #include <immintrin.h>
+#endif
 
 #include "Types.h"
 #include "Tables.h"
