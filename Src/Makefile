@@ -1,4 +1,4 @@
-﻿CXX := g++
+CXX := g++
 CC := gcc
 TARGET := MACE-Kraken-v1
 
@@ -8,9 +8,19 @@ EXTRA_CPPFLAGS ?=
 BUILD_DIR := build
 TARGET_TRIPLE := $(shell $(CXX) -dumpmachine)
 X86_64_TARGET := $(filter x86_64% amd64%,$(TARGET_TRIPLE))
+AARCH64_TARGET := $(filter aarch64% arm64%,$(TARGET_TRIPLE))
+ANDROID_PROFILE := $(filter android-neon android-dotprod,$(BUILD_PROFILE))
 
-ifeq ($(X86_64_TARGET),)
-  $(error MACE-Kraken-v1 64-bit profiles require an x86_64 compiler target; got '$(TARGET_TRIPLE)')
+# The original profiles are x86-64-specific. Android cross-build profiles use
+# the NDK AArch64 compiler and deliberately select portable magic bitboards.
+ifneq ($(ANDROID_PROFILE),)
+  ifeq ($(AARCH64_TARGET),)
+    $(error Android profiles require an AArch64 compiler target; got '$(TARGET_TRIPLE)')
+  endif
+else
+  ifeq ($(X86_64_TARGET),)
+    $(error MACE-Kraken-v1 desktop profiles require an x86_64 compiler target; got '$(TARGET_TRIPLE)')
+  endif
 endif
 
 ifeq ($(BUILD_PROFILE),auto)
@@ -23,8 +33,12 @@ else ifeq ($(BUILD_PROFILE),avx2+bmi2)
   EFFECTIVE_PROFILE := avx2+bmi2
 else ifeq ($(BUILD_PROFILE),avx512+bmi2)
   EFFECTIVE_PROFILE := avx512+bmi2
+else ifeq ($(BUILD_PROFILE),android-neon)
+  EFFECTIVE_PROFILE := android-neon
+else ifeq ($(BUILD_PROFILE),android-dotprod)
+  EFFECTIVE_PROFILE := android-dotprod
 else
-  $(error Unknown BUILD_PROFILE '$(BUILD_PROFILE)'; use auto, portable64, native64, avx2+bmi2, or avx512+bmi2)
+  $(error Unknown BUILD_PROFILE '$(BUILD_PROFILE)'; use auto, portable64, native64, avx2+bmi2, avx512+bmi2, android-neon, or android-dotprod)
 endif
 
 ifneq ($(PGO),0)
@@ -116,39 +130,72 @@ else ifeq ($(EFFECTIVE_PROFILE),avx2+bmi2)
 	ARCH_FLAGS := $(AVX2_BMI2_FLAGS)
 	PROFILE_CPPFLAGS :=
 	FATHOM_PROFILE_FLAGS :=
+else ifeq ($(EFFECTIVE_PROFILE),android-neon)
+	ARCH_FLAGS := -march=armv8-a+simd -mtune=cortex-a76
+	PROFILE_CPPFLAGS := -DMAGNUS_DISABLE_PEXT=1
+	# Let Clang lower __builtin_popcountll to AArch64 NEON CNT.
+	FATHOM_PROFILE_FLAGS :=
+else ifeq ($(EFFECTIVE_PROFILE),android-dotprod)
+	ARCH_FLAGS := -march=armv8.2-a+dotprod -mtune=cortex-a76
+	PROFILE_CPPFLAGS := -DMAGNUS_DISABLE_PEXT=1
+	FATHOM_PROFILE_FLAGS :=
 else
 	ARCH_FLAGS := $(NATIVE64_FLAGS)
 	PROFILE_CPPFLAGS :=
 	FATHOM_PROFILE_FLAGS :=
 endif
 
-OPT_FLAGS := \
-	-Ofast \
-	-DNDEBUG \
-	-flto=auto \
-	-fuse-linker-plugin \
-	-fomit-frame-pointer \
-	-funroll-loops \
-	-fstrict-aliasing \
-	-ffast-math \
-	-fno-math-errno \
-	-fno-signed-zeros \
-	-fno-trapping-math \
-	-fdevirtualize \
-	-fdevirtualize-at-ltrans \
-	-ftree-vectorize \
-	-fipa-pta \
-	-fipa-cp \
-	-fipa-cp-clone \
-	-fipa-icf \
-	-fipa-ra \
-	-falign-functions=32 \
-	-falign-loops=32 \
-	-falign-jumps=32 \
-	-falign-labels=32 \
-	-fweb \
-	-fprefetch-loop-arrays \
-	-frename-registers
+# GCC's IPA/LTO switches are not accepted by the Android NDK Clang driver.
+# Keep the existing desktop optimization pipeline unchanged.
+ifneq ($(ANDROID_PROFILE),)
+	OPT_FLAGS := \
+		-Ofast \
+		-DNDEBUG \
+		-fomit-frame-pointer \
+		-funroll-loops \
+		-fstrict-aliasing \
+		-ffast-math \
+		-fno-math-errno \
+		-fno-signed-zeros \
+		-fno-trapping-math
+	LTO_FLAGS :=
+	ARCH_AS_FLAGS :=
+	ANDROID_POSITION_FLAGS := -fPIE -pthread
+	ANDROID_LINK_FLAGS := -Wl,--gc-sections -pie -static-libstdc++ -pthread
+	LINK_OPT_LEVEL := 2
+else
+	OPT_FLAGS := \
+		-Ofast \
+		-DNDEBUG \
+		-flto=auto \
+		-fuse-linker-plugin \
+		-fomit-frame-pointer \
+		-funroll-loops \
+		-fstrict-aliasing \
+		-ffast-math \
+		-fno-math-errno \
+		-fno-signed-zeros \
+		-fno-trapping-math \
+		-fdevirtualize \
+		-fdevirtualize-at-ltrans \
+		-ftree-vectorize \
+		-fipa-pta \
+		-fipa-cp \
+		-fipa-cp-clone \
+		-fipa-icf \
+		-fipa-ra \
+		-falign-functions=32 \
+		-falign-loops=32 \
+		-falign-jumps=32 \
+		-falign-labels=32 \
+		-fweb \
+		-fprefetch-loop-arrays \
+		-frename-registers
+	LTO_FLAGS := -flto=auto -fuse-linker-plugin
+	ARCH_AS_FLAGS :=
+	ANDROID_POSITION_FLAGS :=
+	ANDROID_LINK_FLAGS :=
+endif
 
 LOWLEVEL_FLAGS := \
 	-fno-exceptions \
@@ -177,6 +224,7 @@ BASE_CXXFLAGS := \
 	$(LOWLEVEL_FLAGS) \
 	$(ENCODING_FLAGS) \
 	$(WARN_FLAGS) \
+	$(ANDROID_POSITION_FLAGS) \
 	$(CPPFLAGS)
 
 FATHOM_CFLAGS := \
@@ -184,6 +232,7 @@ FATHOM_CFLAGS := \
 	$(ARCH_FLAGS) \
 	-O3 \
 	-DNDEBUG \
+	$(ANDROID_POSITION_FLAGS) \
 	$(FATHOM_PROFILE_FLAGS) \
 	-I$(FATHOM_DIR)
 
@@ -195,6 +244,7 @@ LINK_OPT_LEVEL ?= 3
 # which can make the executable fail at runtime or make std::thread throw std::system_error.
 STACK_SIZE_BYTES ?= 1073741824
 
+ifeq ($(ANDROID_PROFILE),)
 ifeq ($(OS),Windows_NT)
 	# MinGW / GNU ld PE stack reserve.
 	STACK_LDFLAGS := -Wl,--stack,$(STACK_SIZE_BYTES)
@@ -202,13 +252,18 @@ else
 	# ELF GNU ld stack-size note.
 	STACK_LDFLAGS := -Wl,-z,stack-size=$(STACK_SIZE_BYTES)
 endif
+else
+	# Android uses the platform default process/thread stack reservation.
+	STACK_LDFLAGS :=
+endif
 
 BASE_LDFLAGS := \
 	$(ARCH_FLAGS) \
 	-Ofast \
-	-flto=auto \
+	$(LTO_FLAGS) \
 	-Wl,-O$(LINK_OPT_LEVEL) \
-	$(STACK_LDFLAGS)
+	$(STACK_LDFLAGS) \
+	$(ANDROID_LINK_FLAGS)
 
 PGO_GENERATE_CXXFLAGS := -fprofile-generate=$(PGO_DIR)
 PGO_GENERATE_LDFLAGS := -fprofile-generate=$(PGO_DIR)
@@ -274,6 +329,9 @@ SEARCH_REFERENCE_TEST_OUTPUT := $(BUILD_DIR)/SearchReferenceTests-$(EFFECTIVE_PR
 CHESS960_TEST_OUTPUT := $(BUILD_DIR)/Chess960Tests-$(EFFECTIVE_PROFILE)$(EXEEXT)
 
 ifeq ($(PGO),1)
+  ifneq ($(ANDROID_PROFILE),)
+    $(error PGO is not supported by the Android cross-build profiles; use PGO=0)
+  endif
 	AUTO_BUILD_TARGET := profile-build
 	FINAL_OUTPUT := $(PGO_OUTPUT)
 else
@@ -374,7 +432,7 @@ endif
 # assembly object so that -fprofile-generate, -flto, and whole-program analysis
 # never touch this blob.
 $(MNUE_EMBEDDED_OBJ): mnue/MnueEmbedded.S build/$(MNUE_EMBEDDED_FILE) Makefile | $(OBJ_DIR)/mnue
-	$(CC) -x assembler-with-cpp -std=gnu99 -m64 -O2 \
+	$(CC) -x assembler-with-cpp -std=gnu99 $(ARCH_AS_FLAGS) $(ARCH_FLAGS) -O2 \
 		-DMNUE_EMBEDDED_PATH='"build/$(MNUE_EMBEDDED_FILE)"' \
 		-I. \
 		-c $< -o $@
