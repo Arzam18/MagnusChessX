@@ -72,6 +72,22 @@ for later generation and scoring work.
  */
 class MovePicker {
 public:
+    struct ScoredEntry {
+        Move move = 0;
+        int score = 0;
+        int see_value = 0;
+        bool quiet_in_skip_band = false;
+        bool quiet_suppressed = false;
+    };
+
+    // Large per-node move-ordering buffers live in Searcher's heap-backed
+    // scratch pool, not in every recursive PVS stack frame.
+    struct Storage {
+        ScoredEntry good_caps[MAX_MOVES];
+        ScoredEntry bad_caps[MAX_MOVES];
+        ScoredEntry quiets[MAX_MOVES];
+    };
+
     MovePicker(
         Position& pos,
         const memory::Memory& mem,
@@ -84,7 +100,8 @@ public:
         ContinuationHistoryContext prev4,
         ContinuationHistoryContext prev8,
         int depth,
-        QuietControl quiet_control = {}
+        QuietControl quiet_control,
+        Storage& storage
     ) noexcept;
 
     [[nodiscard]] Move next() noexcept;
@@ -98,14 +115,6 @@ public:
     [[nodiscard]] int quiet_generated() const noexcept { return quiet_generated_; }
     [[nodiscard]] int quiet_scored() const noexcept { return quiet_scored_; }
     [[nodiscard]] int quiet_suppressed() const noexcept { return quiet_suppressed_; }
-
-    struct ScoredEntry {
-        Move move = 0;
-        int score = 0;
-        int see_value = 0;
-        bool quiet_in_skip_band = false;
-        bool quiet_suppressed = false;
-    };
 
     // Capture list accessors for observation / tooling reuse.
     [[nodiscard]] int good_capture_count() const noexcept { return good_size_; }
@@ -132,9 +141,9 @@ private:
 
     MoveStage stage_ = MoveStage::TT_MOVE;
 
-    ScoredEntry good_caps_[MAX_MOVES]{};
-    ScoredEntry bad_caps_[MAX_MOVES]{};
-    ScoredEntry quiets_[MAX_MOVES]{};
+    ScoredEntry* good_caps_ = nullptr;
+    ScoredEntry* bad_caps_ = nullptr;
+    ScoredEntry* quiets_ = nullptr;
     int good_size_ = 0;
     int bad_size_ = 0;
     int quiet_size_ = 0;
@@ -206,5 +215,8 @@ private:
         last_quiet_suppressed_ = quiet_suppressed;
     }
 };
+
+static_assert(sizeof(MovePicker) < 1024,
+    "MovePicker must stay lightweight; large move buffers belong in Searcher scratch storage");
 
 } // namespace magnus::search

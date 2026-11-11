@@ -72,7 +72,8 @@ MovePicker::MovePicker(
     ContinuationHistoryContext prev4,
     ContinuationHistoryContext prev8,
     int depth,
-    QuietControl quiet_control
+    QuietControl quiet_control,
+    Storage& storage
 ) noexcept
     : pos_(pos)
     , mem_(mem)
@@ -86,7 +87,10 @@ MovePicker::MovePicker(
     , prev4_(prev4)
     , prev8_(prev8)
     , depth_(depth)
-    , quiet_control_(quiet_control) {}
+    , quiet_control_(quiet_control)
+    , good_caps_(storage.good_caps)
+    , bad_caps_(storage.bad_caps)
+    , quiets_(storage.quiets) {}
 
 Move MovePicker::next() noexcept {
     while (true) {

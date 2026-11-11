@@ -29,6 +29,7 @@ SOFTWARE.
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -903,6 +904,57 @@ struct Searcher {
 #endif
 
     using clock = std::chrono::steady_clock;
+
+    // These buffers are needed for the lifetime of a PVS/qsearch node, including
+    // while child nodes recurse. Keeping the large move-ordering and move-list
+    // arrays in a per-Searcher pool avoids multiplying them across Android
+    // worker-thread stack frames.
+    struct PvsScratch {
+        MovePicker::Storage move_picker{};
+#if MAGNUS_CAPTURE_OBS
+        Move capture_moves[MAX_MOVES]{};
+        int capture_base_scores[MAX_MOVES]{};
+        int capture_base_ranks[MAX_MOVES]{};
+#endif
+        Move searched_quiets[MAX_MOVES]{};
+        Move searched_captures[MAX_MOVES]{};
+        int searched_capture_see[MAX_MOVES]{};
+        MoveList probcut_moves{};
+        ScoredMoveList probcut_scored{};
+        MoveList qsearch_moves{};
+        ScoredMoveList qsearch_scored{};
+    };
+
+    static constexpr std::size_t PVS_SCRATCH_SLOTS = MAX_PLY + 16;
+    std::array<PvsScratch, PVS_SCRATCH_SLOTS> pvs_scratch{};
+    std::size_t pvs_scratch_depth = 0;
+
+    // Reentrant PVS calls can occur at the same nominal ply (for example,
+    // verification searches), so the pool is leased by active call depth,
+    // not indexed only by `ply`.
+    struct PvsScratchLease {
+        Searcher* owner = nullptr;
+        std::size_t index = 0;
+
+        explicit PvsScratchLease(Searcher& searcher) noexcept
+            : owner(&searcher), index(searcher.pvs_scratch_depth) {
+            if (index >= searcher.pvs_scratch.size())
+                std::abort();
+            ++searcher.pvs_scratch_depth;
+        }
+
+        PvsScratchLease(const PvsScratchLease&) = delete;
+        PvsScratchLease& operator=(const PvsScratchLease&) = delete;
+
+        ~PvsScratchLease() noexcept {
+            if (owner)
+                --owner->pvs_scratch_depth;
+        }
+
+        [[nodiscard]] PvsScratch& get() noexcept {
+            return owner->pvs_scratch[index];
+        }
+    };
 
     memory::Memory& mem;
     WorkerPersistentState& persistent;
@@ -3272,7 +3324,14 @@ struct Searcher {
                 alpha = stand_pat_eval;
         }
 
-        MoveList list;
+        // Qsearch also recurses while both move buffers remain live. Reuse the
+        // same per-Searcher scratch pool so its ~5 KiB of arrays do not multiply
+        // across the Android worker-thread stack.
+        PvsScratchLease scratch_lease(*this);
+        PvsScratch& scratch = scratch_lease.get();
+        MoveList& list = scratch.qsearch_moves;
+        list.size = 0;
+
         GenInfo info;
         init_gen_info(info, pos, mem);
         Move* qend = generate_pseudo_captures(pos, mem, info, list.moves);
@@ -3284,7 +3343,8 @@ struct Searcher {
             return score;
         }
 
-        ScoredMoveList scored{};
+        ScoredMoveList& scored = scratch.qsearch_scored;
+        scored.size = 0;
         Bitboard q_capture_threats = 0ULL;
         if constexpr (SearchComponents::threat_capture_history) {
             for (int i = 0; i < list.size; ++i) {
@@ -3704,6 +3764,11 @@ struct Searcher {
             }
         }
 
+        // Lease scratch before ProbCut: its candidate buffers remain live while
+        // qsearch/PVS recursively search each candidate.
+        PvsScratchLease scratch_lease(*this);
+        PvsScratch& scratch = scratch_lease.get();
+
 #if MAGNUS_ENABLE_PROBCUT
         if (limits.components.probcut &&
             can_prune &&
@@ -3723,12 +3788,14 @@ struct Searcher {
                 return probed_tt_score;
             }
 
-            MoveList probcut_moves{};
+            MoveList& probcut_moves = scratch.probcut_moves;
+            probcut_moves.size = 0;
             Move* probcut_end = generate_pseudo_captures_only(pos, mem, info, probcut_moves.moves);
             probcut_moves.size = static_cast<int>(probcut_end - probcut_moves.moves);
 
             if (probcut_moves.size > 0) {
-                ScoredMoveList scored_probcut{};
+                ScoredMoveList& scored_probcut = scratch.probcut_scored;
+                scored_probcut.size = 0;
                 score_moves(
                     pos,
                     probcut_moves,
@@ -3838,7 +3905,8 @@ struct Searcher {
             prev4,
             prev8,
             node_depth,
-            quiet_control
+            quiet_control,
+            scratch.move_picker
         );
 #if MAGNUS_MOVEPICKER_OBS
         ++mp_obs.nodes;
@@ -3852,9 +3920,9 @@ struct Searcher {
 #endif
 
 #if MAGNUS_CAPTURE_OBS
-        Move capture_moves[MAX_MOVES];
-        int capture_base_scores[MAX_MOVES];
-        int capture_base_ranks[MAX_MOVES];
+        Move* capture_moves = scratch.capture_moves;
+        int* capture_base_scores = scratch.capture_base_scores;
+        int* capture_base_ranks = scratch.capture_base_ranks;
         int capture_count = 0;
         // Reuse MovePicker's already-generated capture lists instead of regenerating.
         {
@@ -3887,10 +3955,10 @@ struct Searcher {
         Move best_move = 0;
         int legal_count = 0;
         int quiet_count = 0;
-        Move searched_quiets[MAX_MOVES];
+        Move* searched_quiets = scratch.searched_quiets;
         int searched_quiet_count = 0;
-        Move searched_captures[MAX_MOVES];
-        int searched_capture_see[MAX_MOVES];
+        Move* searched_captures = scratch.searched_captures;
+        int* searched_capture_see = scratch.searched_capture_see;
         int searched_capture_count = 0;
         int simple_capture_count = 0;
         int capture_index = 0;
